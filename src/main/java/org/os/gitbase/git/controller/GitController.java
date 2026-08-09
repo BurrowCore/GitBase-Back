@@ -11,6 +11,7 @@ import org.os.gitbase.git.dto.CreateRepositoryDto;
 import org.os.gitbase.git.dto.DirectoryListingDto;
 import org.os.gitbase.git.dto.FileContentDto;
 import org.os.gitbase.git.dto.FileTreeNode;
+import org.os.gitbase.git.dto.RawFileDto;
 import org.os.gitbase.git.dto.RepositoryInfo;
 import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.enums.ActivityType;
@@ -19,10 +20,13 @@ import org.os.gitbase.git.service.GitService;
 import org.os.gitbase.git.service.PushSyncService;
 import org.os.gitbase.helper.Helper;
 import org.os.gitbase.security.RepositoryAccessGuard;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -194,6 +198,42 @@ public class GitController {
         accessGuard.requireReadAccess(username, repoName, principal);
         FileContentDto file = gitService.getFileContent(username, repoName, ref, path);
         return ResponseEntity.ok(ApiResponseEntity.ok(file, "File content retrieved"));
+    }
+
+    // -------------------- RAW FILE (image preview / download) --------------------
+
+    /**
+     * Streams a blob's raw bytes. Deliberately NOT wrapped in {@link ApiResponseEntity} — this is a
+     * binary transport endpoint (like git smart-HTTP), consumed directly by {@code <img src>} and
+     * download links.
+     *
+     * <p>Hardening: the content type comes from a server-side allowlist, {@code nosniff} stops the
+     * browser from re-interpreting a file as HTML, and anything not a raster image or plain text is
+     * forced to download. Together these stop a repository from hosting active content on our origin.
+     */
+    @GetMapping("/{username}/{repoName}/raw")
+    public ResponseEntity<byte[]> getRawFile(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            @RequestParam(required = false) String ref,
+            @RequestParam String path,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
+        RawFileDto raw = gitService.getRawFile(username, repoName, ref, path);
+
+        String fileName = raw.path().substring(raw.path().lastIndexOf('/') + 1);
+        ContentDisposition disposition = (raw.inline()
+                ? ContentDisposition.inline()
+                : ContentDisposition.attachment())
+                .filename(fileName, StandardCharsets.UTF_8)
+                .build();
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, raw.contentType())
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .header("X-Content-Type-Options", "nosniff")
+                .header(HttpHeaders.CACHE_CONTROL, "private, max-age=60")
+                .body(raw.content());
     }
 
     // -------------------- DELETE REPOSITORY --------------------

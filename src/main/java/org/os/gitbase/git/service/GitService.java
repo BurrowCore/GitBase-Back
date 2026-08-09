@@ -10,6 +10,7 @@ import org.os.gitbase.git.dto.CompareDto;
 import org.os.gitbase.git.dto.DirectoryListingDto;
 import org.os.gitbase.git.dto.FileContentDto;
 import org.os.gitbase.git.dto.FileTreeNode;
+import org.os.gitbase.git.dto.RawFileDto;
 import org.os.gitbase.git.dto.RepositoryInfo;
 import org.os.gitbase.git.dto.RepositoryTreeDto;
 
@@ -26,6 +27,9 @@ public interface GitService {
 
     /** Raw content of a single file (blob) at the given ref. */
     FileContentDto getFileContent(String username, String repoName, String ref, String path);
+
+    /** Raw bytes of a blob, for image preview and file download. */
+    RawFileDto getRawFile(String username, String repoName, String ref, String path);
 
     /**
      * GitHub-style listing of one directory level at the given path/ref, where each entry

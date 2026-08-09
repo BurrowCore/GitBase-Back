@@ -35,6 +35,7 @@ import org.os.gitbase.git.dto.FileDiffDto;
 import org.os.gitbase.git.dto.DirectoryListingDto;
 import org.os.gitbase.git.dto.FileContentDto;
 import org.os.gitbase.git.dto.FileTreeNode;
+import org.os.gitbase.git.dto.RawFileDto;
 import org.os.gitbase.git.dto.RepositoryInfo;
 import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.RepositoryGit;
@@ -57,6 +58,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -521,6 +523,92 @@ public class GitServiceImpl implements GitService {
         } catch (IOException e) {
             throw new RuntimeException("Failed to read file " + path + " in " + username + "/" + repoName, e);
         }
+    }
+
+    /** Hard cap on a raw blob we will materialise in memory (ADR-004: bound every read). */
+    private static final long MAX_RAW_BYTES = 25L * 1024 * 1024;
+
+    /**
+     * Raster image types we are willing to render inline. Everything else — including SVG, which
+     * can carry script — is served as a download so a repository can never host active content
+     * on our origin.
+     */
+    private static final Map<String, String> INLINE_IMAGE_TYPES = Map.of(
+            "png", "image/png",
+            "jpg", "image/jpeg",
+            "jpeg", "image/jpeg",
+            "gif", "image/gif",
+            "webp", "image/webp",
+            "avif", "image/avif",
+            "bmp", "image/bmp",
+            "ico", "image/x-icon"
+    );
+
+    /**
+     * Returns the raw bytes of a blob for image preview / download.
+     *
+     * <p>Content type is decided by a strict allowlist rather than by trusting the file: raster
+     * images render inline, other text renders as {@code text/plain}, and everything else is forced
+     * to {@code application/octet-stream} as an attachment.
+     */
+    @Override
+    public RawFileDto getRawFile(String username, String repoName, String ref, String path) {
+        validateUsername(username);
+        validateRepositoryName(repoName);
+        if (!StringUtils.hasText(path)) {
+            throw new IllegalArgumentException("File path cannot be empty");
+        }
+
+        if (!repositoryExists(username, repoName)) {
+            throw new ResourceNotFoundException("Repository not found: " + username + "/" + repoName);
+        }
+
+        String repoPath = Paths.get(repositoriesPath, username, repoName + ".git").toString();
+        try (Repository repo = new FileRepositoryBuilder()
+                .setGitDir(new File(repoPath))
+                .setBare()
+                .build()) {
+
+            ObjectId commitId = resolveRef(repo, ref);
+            if (commitId == null) {
+                throw new ResourceNotFoundException("Repository is empty: " + username + "/" + repoName);
+            }
+
+            try (RevWalk revWalk = new RevWalk(repo)) {
+                RevCommit commit = revWalk.parseCommit(commitId);
+                try (TreeWalk treeWalk = TreeWalk.forPath(repo, path, commit.getTree())) {
+                    if (treeWalk == null) {
+                        throw new ResourceNotFoundException("File not found: " + path);
+                    }
+                    ObjectLoader loader = repo.open(treeWalk.getObjectId(0));
+                    if (loader.getSize() > MAX_RAW_BYTES) {
+                        throw new IllegalArgumentException(
+                                "File is too large to serve (" + loader.getSize() + " bytes, limit " + MAX_RAW_BYTES + ")");
+                    }
+                    byte[] bytes = loader.getBytes();
+                    return buildRawFile(path, bytes);
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read raw file " + path + " in " + username + "/" + repoName, e);
+        }
+    }
+
+    /** Applies the inline/download content-type policy to a blob's bytes. */
+    private RawFileDto buildRawFile(String path, byte[] bytes) {
+        String name = path.substring(path.lastIndexOf('/') + 1).toLowerCase();
+        String ext = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : "";
+
+        String imageType = INLINE_IMAGE_TYPES.get(ext);
+        if (imageType != null) {
+            return new RawFileDto(path, bytes, imageType, true);
+        }
+        if (!isBinary(bytes)) {
+            // Safe to show in a browser tab: text/plain + nosniff (set by the controller) means it
+            // is never interpreted as HTML, so repository content cannot execute on our origin.
+            return new RawFileDto(path, bytes, "text/plain; charset=utf-8", true);
+        }
+        return new RawFileDto(path, bytes, "application/octet-stream", false);
     }
 
     /**
