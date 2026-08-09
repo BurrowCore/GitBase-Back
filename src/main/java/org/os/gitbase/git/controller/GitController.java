@@ -18,6 +18,7 @@ import org.os.gitbase.git.service.ActivityService;
 import org.os.gitbase.git.service.GitService;
 import org.os.gitbase.git.service.PushSyncService;
 import org.os.gitbase.helper.Helper;
+import org.os.gitbase.security.RepositoryAccessGuard;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -37,11 +38,14 @@ public class GitController {
     private final GitService gitService;
     private final ActivityService activityService;
     private final PushSyncService pushSyncService;
+    private final RepositoryAccessGuard accessGuard;
 
-    public GitController(GitService gitService, ActivityService activityService, PushSyncService pushSyncService) {
+    public GitController(GitService gitService, ActivityService activityService,
+                         PushSyncService pushSyncService, RepositoryAccessGuard accessGuard) {
         this.gitService = gitService;
         this.activityService = activityService;
         this.pushSyncService = pushSyncService;
+        this.accessGuard = accessGuard;
     }
 
     // -------------------- CREATE REPOSITORY --------------------
@@ -81,7 +85,9 @@ public class GitController {
     @GetMapping(REPOSITORY_INFO)
     public ResponseEntity<ApiResponseEntity<RepositoryInfo>> getRepositoryInfo(
             @RequestParam String username,
-            @RequestParam String repoName) {
+            @RequestParam String repoName,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         RepositoryInfo info = gitService.getRepositoryInfo(username, repoName);
         return ResponseEntity.ok(ApiResponseEntity.ok(info, "Repository info retrieved"));
     }
@@ -89,8 +95,13 @@ public class GitController {
     // -------------------- LIST ALL USER REPOSITORIES --------------------
     @GetMapping(REPOSITORIES + "/{username}")
     public ResponseEntity<ApiResponseEntity<List<RepositoryTreeDto>>> listRepositories(
-            @PathVariable String username) {
+            @PathVariable String username,
+            Principal principal) {
         List<RepositoryTreeDto> repos = gitService.listRepositories(username);
+        // Owners see everything; others only see public repositories.
+        if (!accessGuard.isOwner(username, principal)) {
+            repos = repos.stream().filter(r -> !r.isPrivate()).toList();
+        }
         return ResponseEntity.ok(ApiResponseEntity.ok(repos, "Repositories retrieved"));
     }
 
@@ -99,7 +110,9 @@ public class GitController {
     public ResponseEntity<ApiResponseEntity<FileTreeNode>> getTree(
             @PathVariable String username,
             @PathVariable String repoName,
-            @RequestParam(required = false) String ref) {
+            @RequestParam(required = false) String ref,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         FileTreeNode tree = gitService.getTree(username, repoName, ref);
         return ResponseEntity.ok(ApiResponseEntity.ok(tree, "File tree retrieved"));
     }
@@ -110,7 +123,9 @@ public class GitController {
             @PathVariable String username,
             @PathVariable String repoName,
             @RequestParam(required = false) String ref,
-            @RequestParam(required = false, defaultValue = "") String path) {
+            @RequestParam(required = false, defaultValue = "") String path,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         DirectoryListingDto listing = gitService.listContents(username, repoName, ref, path);
         return ResponseEntity.ok(ApiResponseEntity.ok(listing, "Directory listing retrieved"));
     }
@@ -119,7 +134,9 @@ public class GitController {
     @GetMapping("/{username}/{repoName}/branches")
     public ResponseEntity<ApiResponseEntity<List<BranchSummaryDto>>> listBranches(
             @PathVariable String username,
-            @PathVariable String repoName) {
+            @PathVariable String repoName,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         pushSyncService.ensureSynced(username, repoName);
         List<BranchSummaryDto> branches = gitService.listBranches(username, repoName);
         return ResponseEntity.ok(ApiResponseEntity.ok(branches, "Branches retrieved"));
@@ -131,7 +148,9 @@ public class GitController {
             @PathVariable String username,
             @PathVariable String repoName,
             @RequestParam String base,
-            @RequestParam String head) {
+            @RequestParam String head,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         CompareDto result = gitService.compare(username, repoName, base, head);
         return ResponseEntity.ok(ApiResponseEntity.ok(result, "Comparison computed"));
     }
@@ -144,7 +163,9 @@ public class GitController {
             @RequestParam(required = false) String ref,
             @RequestParam(required = false) String path,
             @RequestParam(required = false, defaultValue = "0") int page,
-            @RequestParam(required = false, defaultValue = "30") int size) {
+            @RequestParam(required = false, defaultValue = "30") int size,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         pushSyncService.ensureSynced(username, repoName);
         CommitPageDto commits = gitService.listCommitHistory(username, repoName, ref, path, page, size);
         return ResponseEntity.ok(ApiResponseEntity.ok(commits, "Commit history retrieved"));
@@ -155,7 +176,9 @@ public class GitController {
     public ResponseEntity<ApiResponseEntity<CommitDetailDto>> getCommitDetail(
             @PathVariable String username,
             @PathVariable String repoName,
-            @PathVariable String sha) {
+            @PathVariable String sha,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         CommitDetailDto detail = gitService.getCommitDetail(username, repoName, sha);
         return ResponseEntity.ok(ApiResponseEntity.ok(detail, "Commit detail retrieved"));
     }
@@ -166,7 +189,9 @@ public class GitController {
             @PathVariable String username,
             @PathVariable String repoName,
             @RequestParam(required = false) String ref,
-            @RequestParam String path) {
+            @RequestParam String path,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
         FileContentDto file = gitService.getFileContent(username, repoName, ref, path);
         return ResponseEntity.ok(ApiResponseEntity.ok(file, "File content retrieved"));
     }
