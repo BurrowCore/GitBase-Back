@@ -1,7 +1,6 @@
 package org.os.gitbase.git.config;
 
 import org.eclipse.jgit.http.server.GitServlet;
-import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.transport.ReceivePack;
 import org.eclipse.jgit.transport.resolver.ReceivePackFactory;
 import org.os.gitbase.git.hook.PushSyncHook;
@@ -9,37 +8,17 @@ import org.springframework.boot.web.servlet.ServletRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.io.File;
-import java.io.IOException;
-
 @Configuration
 public class GitServletConfig {
 
-    private static final String BASE_PATH = "./gitbase/repositories";
-
     // handle refinfo, receivepacks and uploadpacks
     @Bean
-    public ServletRegistrationBean<GitServlet> gitServlet(PushSyncHook pushSyncHook) {
+    public ServletRegistrationBean<GitServlet> gitServlet(PushSyncHook pushSyncHook,
+                                                          GitbaseRepositoryResolver repositoryResolver) {
         GitServlet gitServlet = new GitServlet();
 
-        gitServlet.setRepositoryResolver((req, name) -> {
-            File repoDir = new File(BASE_PATH, name);
-            if (!repoDir.exists()) {
-                try {
-                    throw new IOException("Repository not found: " + name);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-
-            try {
-                return new FileRepositoryBuilder()
-                        .setGitDir(repoDir)
-                        .build();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
+        // Visibility- and traversal-checked resolver: private repos are only served to their owner.
+        gitServlet.setRepositoryResolver(repositoryResolver);
 
         // Attach the DB-sync post-receive hook to every push handled by the servlet.
         gitServlet.setReceivePackFactory((ReceivePackFactory<jakarta.servlet.http.HttpServletRequest>) (req, db) -> {

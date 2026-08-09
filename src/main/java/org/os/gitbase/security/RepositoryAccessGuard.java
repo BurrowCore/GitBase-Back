@@ -1,5 +1,6 @@
 package org.os.gitbase.security;
 
+import org.os.gitbase.exception.AccessDeniedDomainException;
 import org.os.gitbase.exception.ResourceNotFoundException;
 import org.os.gitbase.git.entity.RepositoryGit;
 import org.os.gitbase.git.repository.GitRepositoryDB;
@@ -49,6 +50,23 @@ public class RepositoryAccessGuard {
         }
         // Private repo the caller does not own: mask its existence.
         throw notFound(ownerUsername, repoName);
+    }
+
+    /**
+     * Ensures the authenticated caller may write (push to) the given repository.
+     *
+     * <p>Only the owner may write. A private repository the caller cannot see is masked as
+     * {@link ResourceNotFoundException} (404); a public repository the caller does not own yields
+     * {@link AccessDeniedDomainException} (403) — its existence is already public.
+     */
+    public RepositoryGit requireWriteAccess(String ownerUsername, String repoName, Principal principal) {
+        // Resolves + masks hidden private repos as 404 before we reveal anything via 403.
+        RepositoryGit repo = requireReadAccess(ownerUsername, repoName, principal);
+        if (!isOwner(ownerUsername, principal)) {
+            throw new AccessDeniedDomainException(
+                    "You do not have write access to " + ownerUsername + "/" + repoName);
+        }
+        return repo;
     }
 
     /** True when the authenticated caller owns the given namespace. */

@@ -1,191 +1,47 @@
 package org.os.gitbase.git.service;
 
-import jakarta.servlet.ServletInputStream;
 import lombok.extern.slf4j.Slf4j;
-import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
-import org.eclipse.jgit.transport.*;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import org.eclipse.jgit.util.io.NullOutputStream;
 import org.os.gitbase.auth.repository.UserRepository;
 import org.os.gitbase.exception.AccessDeniedDomainException;
 import org.os.gitbase.exception.ResourceNotFoundException;
 import org.os.gitbase.git.dto.GitTokenInfo;
 import org.os.gitbase.git.entity.GitToken;
-import org.os.gitbase.git.hook.PushSyncHook;
 import org.os.gitbase.git.mapper.GitTokenMapper;
 import org.os.gitbase.git.repository.GitTokenRepository;
-import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
-import org.springframework.web.util.WebUtils;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Manages Git personal access tokens (create / validate / list / revoke).
+ *
+ * <p>All Git smart-HTTP transport (info/refs, upload-pack, receive-pack) is served exclusively by
+ * the JGit {@code GitServlet} mounted at {@code /gitbase/*} — see {@code GitServletConfig},
+ * {@code GitbaseRepositoryResolver} (read gate + path jail) and {@code GitbaseReceivePackFactory}
+ * (write gate). The previous manual pack handlers were removed in favour of that single path.
+ */
 @Service
 @Slf4j
-public class CommandGitService  {
+public class CommandGitService {
+
     private final GitTokenRepository repo;
     private final GitTokenMapper gitTokenMapper;
     private final PasswordEncoder passwordEncoder;
-    private static final String BASE_PATH = "./gitbase/repositories"; // root path
     private final UserRepository userRepository;
-    private final PushSyncHook pushSyncHook;
-    public CommandGitService(GitTokenRepository repo, PasswordEncoder passwordEncoder, UserRepository userRepository, GitTokenMapper gitTokenMapper, PushSyncHook pushSyncHook) {
+
+    public CommandGitService(GitTokenRepository repo, PasswordEncoder passwordEncoder,
+                             UserRepository userRepository, GitTokenMapper gitTokenMapper) {
         this.repo = repo;
         this.passwordEncoder = passwordEncoder;
         this.userRepository = userRepository;
         this.gitTokenMapper = gitTokenMapper;
-        this.pushSyncHook = pushSyncHook;
     }
-
-    private Repository openRepository(String username, String repoName) throws IOException {
-        File repoDir = new File(BASE_PATH + "/" + username + "/" + repoName + ".git");
-        return new FileRepositoryBuilder()
-                .setGitDir(repoDir)
-                .readEnvironment()
-                .findGitDir()
-                .build();
-    }
-
-
-
-    /**
-     * Handle Git info/refs requests (advertises refs for fetch/push)
-     */
-    public void handleInfoRefs(String username, String repoName, String service, HttpServletResponse response) {
-        log.debug("Handling info/refs for {}/{} service={}", username, repoName, service);
-
-        if (service == null || (!"git-upload-pack".equals(service) && !"git-receive-pack".equals(service))) {
-            sendError(response, HttpStatus.BAD_REQUEST.value(), "Unsupported or missing service");
-            return;
-        }
-
-        try (Repository repo = openRepository(username, repoName)) {
-            if (repo == null) {
-                sendError(response, HttpStatus.NOT_FOUND.value(), "Repository not found");
-                return;
-            }
-
-            // Required headers
-            response.setHeader("Cache-Control", "no-cache, max-age=0, must-revalidate");
-            response.setHeader("Pragma", "no-cache");
-            response.setHeader("Expires", "Fri, 01 Jan 1980 00:00:00 GMT");
-
-            try (OutputStream rawOut = response.getOutputStream()) {
-                PacketLineOut packetOut = new PacketLineOut(rawOut);
-
-                if ("git-upload-pack".equals(service)) {
-                    response.setContentType("application/x-git-upload-pack-advertisement");
-
-                    packetOut.writeString("# service=git-upload-pack\n");
-                    packetOut.end();
-
-                    UploadPack up = new UploadPack(repo);
-                    up.sendAdvertisedRefs(new RefAdvertiser.PacketLineOutRefAdvertiser(packetOut));
-
-                } else {
-                    response.setContentType("application/x-git-receive-pack-advertisement");
-
-                    packetOut.writeString("# service=git-receive-pack\n");
-                    packetOut.end();
-
-                    ReceivePack rp = new ReceivePack(repo);
-                    configureReceivePack(rp);
-                    rp.sendAdvertisedRefs(new RefAdvertiser.PacketLineOutRefAdvertiser(packetOut));
-                }
-
-                rawOut.flush();
-            }
-
-        } catch (Exception e) {
-            log.error("Error in handleInfoRefs: {}", e.getMessage(), e);
-            sendError(response, HttpStatus.INTERNAL_SERVER_ERROR.value(), "Internal server error");
-        }
-    }
-    /**
-     * Handle upload-pack (fetch/clone)
-     */
-    public void handleUploadPack(String username, String repoName,
-                                 HttpServletRequest request, HttpServletResponse response) {
-        log.debug("Handling upload-pack for {}/{}", username, repoName);
-
-        try (Repository repo = openRepository(username, repoName)) {
-            if (repo == null) {
-                sendError(response, HttpStatus.NOT_FOUND.value(), "Repository not found");
-                return;
-            }
-
-            response.setContentType("application/x-git-upload-pack-result");
-            response.setHeader("Cache-Control", "no-cache");
-
-            try (ServletInputStream in = request.getInputStream();
-                 OutputStream out = response.getOutputStream()) {
-
-                UploadPack up = new UploadPack(repo);
-                up.setTimeout(0);
-                up.upload(in, out, NullOutputStream.INSTANCE);
-
-                out.flush();
-            }
-
-        } catch (Exception e) {
-            log.error("Error in handleUploadPack: {}", e.getMessage(), e);
-            sendError(response, HttpStatus.INTERNAL_SERVER_ERROR.value(), "Upload failed");
-        }
-    }
-
-    /**
-     * Handle receive-pack (push)
-     */
-    public void handleReceivePack(String username, String repoName,
-                                  HttpServletRequest request, HttpServletResponse response) {
-        log.debug("Handling receive-pack for {}/{}", username, repoName);
-
-        try (Repository repo = openRepository(username, repoName)) {
-            if (repo == null) {
-                sendError(response, HttpStatus.NOT_FOUND.value(), "Repository not found");
-                return;
-            }
-
-            response.setContentType("application/x-git-receive-pack-result");
-            response.setHeader("Cache-Control", "no-cache");
-
-            try (ServletInputStream in = request.getInputStream();
-                 OutputStream out = response.getOutputStream()) {
-
-                ReceivePack rp = new ReceivePack(repo);
-                configureReceivePack(rp);
-
-                // Let JGit handle the entire protocol
-                rp.receive(request.getInputStream(), response.getOutputStream(), System.err); // or NullOutputStream.INSTANCE for side-band 2 (progress)
-                out.flush();
-
-                return; // IMPORTANT: do not let Spring write any error page
-            }
-
-        } catch (Exception e) {
-            log.error("Error in handleReceivePack: {}", e.getMessage(), e);
-            sendError(response, HttpStatus.INTERNAL_SERVER_ERROR.value(), "Push failed");
-        }
-    }
-
-
-
-
-
 
     public String createToken(String user, String name, String scopes, Duration validity) {
-
         String rawToken = UUID.randomUUID().toString().replace("-", "");
         String hash = passwordEncoder.encode(rawToken); // uses Argon2
 
@@ -218,8 +74,8 @@ public class CommandGitService  {
     /**
      * Revokes (deletes) a personal access token owned by {@code username}.
      *
-     * @throws ResourceNotFoundException     if no token exists with that id
-     * @throws AccessDeniedDomainException   if the token belongs to another user
+     * @throws ResourceNotFoundException   if no token exists with that id
+     * @throws AccessDeniedDomainException if the token belongs to another user
      */
     public void revokeToken(String username, Long tokenId) {
         GitToken token = repo.findById(tokenId)
@@ -232,28 +88,4 @@ public class CommandGitService  {
         repo.delete(token);
         log.info("Revoked token id={} for user={}", tokenId, username);
     }
-
-    private void configureReceivePack(ReceivePack rp) {
-        rp.setCheckReceivedObjects(true);
-        rp.setCheckReferencedObjectsAreReachable(true);
-        rp.setAllowCreates(true);
-        rp.setAllowDeletes(true);
-        rp.setAllowNonFastForwards(true);
-
-        rp.setPreReceiveHook((receivePack, commands) ->
-                log.debug("Pre-receive hook: {} commands", commands.size()));
-        // Mirror the push into the database (commits / branch heads / activity).
-        rp.setPostReceiveHook(pushSyncHook);
-    }
-    private void sendError(HttpServletResponse response, int status, String message) {
-        try {
-            if (!response.isCommitted()) {
-                response.sendError(status, message);
-            }
-        } catch (IOException ex) {
-            log.error("Failed to send error response: {}", ex.getMessage(), ex);
-        }
-    }
-
 }
-
