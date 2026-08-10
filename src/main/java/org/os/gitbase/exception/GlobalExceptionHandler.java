@@ -9,6 +9,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.stream.Collectors;
 
 /**
@@ -53,6 +55,24 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponseEntity<Void>> handleAccessDenied(AccessDeniedDomainException ex) {
         log.debug("Access denied: {}", ex.getMessage());
         return build(HttpStatus.FORBIDDEN, "FORBIDDEN", ex.getMessage());
+    }
+
+    /**
+     * State collisions → 409. Merge conflicts carry the conflicting paths in {@code data} so the
+     * UI can list exactly which files need attention.
+     */
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiResponseEntity<List<String>>> handleConflict(ConflictException ex) {
+        log.debug("Conflict: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(new ApiResponseEntity<>(
+                Instant.now(), false, ex.getMessage(), HttpStatus.CONFLICT, "CONFLICT", ex.getConflicts()));
+    }
+
+    /** Operation not allowed for the resource's current lifecycle state → 405. */
+    @ExceptionHandler(InvalidStateException.class)
+    public ResponseEntity<ApiResponseEntity<Void>> handleInvalidState(InvalidStateException ex) {
+        log.debug("Invalid state: {}", ex.getMessage());
+        return build(HttpStatus.METHOD_NOT_ALLOWED, "INVALID_STATE", ex.getMessage());
     }
 
     /** Path-traversal / security guard trips → 403, with a generic message (no internals leaked). */
