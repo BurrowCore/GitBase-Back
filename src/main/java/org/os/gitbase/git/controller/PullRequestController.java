@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.security.Principal;
+import java.util.List;
 
 import static org.os.gitbase.constant.Constant.GITBASE_MAPPING_REQUEST;
 
@@ -64,6 +65,22 @@ public class PullRequestController {
         PullRequestDto created = pullRequestService.create(username, repoName, actor(principal), request);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponseEntity.created(created, "Pull request created"));
+    }
+
+    // -------------------- BRANCH SUGGESTIONS (CLI → web discovery) --------------------
+
+    /**
+     * Recently-pushed branches with no open pull request. Read live from git, so a branch created
+     * over the CLI appears here on the next page load without any sync step.
+     */
+    @GetMapping("/suggestions")
+    public ResponseEntity<ApiResponseEntity<List<PullSuggestionDto>>> suggestions(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
+        List<PullSuggestionDto> suggestions = pullRequestService.suggestions(username, repoName);
+        return ResponseEntity.ok(ApiResponseEntity.ok(suggestions, "Branch suggestions retrieved"));
     }
 
     // -------------------- DETAIL --------------------

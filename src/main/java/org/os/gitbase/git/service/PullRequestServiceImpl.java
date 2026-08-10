@@ -6,6 +6,7 @@ import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.merge.MergeStrategy;
@@ -40,11 +41,15 @@ import org.springframework.transaction.annotation.Transactional;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Pull-request lifecycle implementation.
@@ -408,6 +413,70 @@ public class PullRequestServiceImpl implements PullRequestService {
         comment.setBody(request.body().trim());
 
         return toCommentDto(commentRepository.save(comment));
+    }
+
+    // ────────────────────────────── branch suggestions ──────────────────────────────
+
+    /** How recently a branch must have been pushed to earn a banner. */
+    private static final long RECENT_WINDOW_MILLIS = Duration.ofDays(7).toMillis();
+    /** Upper bound on suggestions returned, so the walk stays cheap (ADR-004). */
+    private static final int MAX_SUGGESTIONS = 5;
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<PullSuggestionDto> suggestions(String owner, String repoName) {
+        RepositoryGit repoEntity = requireRepository(owner, repoName);
+        Set<String> alreadyProposed = new HashSet<>(pullRequestRepository.findOpenSourceBranches(repoEntity));
+
+        long cutoff = System.currentTimeMillis() - RECENT_WINDOW_MILLIS;
+        List<PullSuggestionDto> found = new ArrayList<>();
+
+        try (Repository repo = openRepository(owner, repoName)) {
+            String defaultBranch = defaultBranchOf(repo);
+
+            try (RevWalk walk = new RevWalk(repo)) {
+                for (Ref ref : repo.getRefDatabase().getRefsByPrefix(Constants.R_HEADS)) {
+                    String branch = Repository.shortenRefName(ref.getName());
+                    // A branch is only worth proposing if it isn't the merge target and isn't
+                    // already the source of an open pull request.
+                    if (branch.equals(defaultBranch) || alreadyProposed.contains(branch)) {
+                        continue;
+                    }
+                    ObjectId tip = ref.getObjectId();
+                    if (tip == null) {
+                        continue;
+                    }
+                    RevCommit commit = walk.parseCommit(tip);
+                    long committedAt = commit.getCommitTime() * 1000L;
+                    if (committedAt < cutoff) {
+                        continue;
+                    }
+                    found.add(new PullSuggestionDto(
+                            branch,
+                            tip.getName(),
+                            tip.getName().substring(0, 7),
+                            commit.getShortMessage(),
+                            commit.getAuthorIdent() != null ? commit.getAuthorIdent().getName() : null,
+                            committedAt));
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            // A banner is decorative: never fail the page over it.
+            log.debug("Could not compute pull suggestions for {}/{}: {}", owner, repoName, e.getMessage());
+            return List.of();
+        }
+
+        found.sort(Comparator.comparingLong(PullSuggestionDto::lastCommitAt).reversed());
+        return found.size() > MAX_SUGGESTIONS ? List.copyOf(found.subList(0, MAX_SUGGESTIONS)) : List.copyOf(found);
+    }
+
+    /** Branch that HEAD points at, or {@code null} for a detached/empty repository. */
+    private String defaultBranchOf(Repository repo) throws IOException {
+        Ref head = repo.exactRef(Constants.HEAD);
+        if (head != null && head.isSymbolic() && head.getTarget() != null) {
+            return Repository.shortenRefName(head.getTarget().getName());
+        }
+        return null;
     }
 
     // ────────────────────────────── helpers ──────────────────────────────

@@ -29,4 +29,11 @@ public interface PullRequestService {
     CommentPageDto listComments(String owner, String repoName, int number, int page, int size);
 
     CommentDto addComment(String owner, String repoName, int number, String actor, CreateCommentDto request);
+
+    /**
+     * Recently-pushed branches that have no open pull request — powers the "Compare &amp; pull
+     * request" banner, so a branch created over the CLI is discoverable without digging into the
+     * new-pull-request form.
+     */
+    java.util.List<PullSuggestionDto> suggestions(String owner, String repoName);
 }

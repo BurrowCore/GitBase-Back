@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.List;
 import java.util.Optional;
 
 @org.springframework.stereotype.Repository
@@ -26,6 +27,13 @@ public interface PullRequestRepository extends JpaRepository<PullRequest, Long> 
             RepositoryGit repository, String sourceBranch, String targetBranch, PullRequestStatus status);
 
     long countByRepositoryAndStatus(RepositoryGit repository, PullRequestStatus status);
+
+    /**
+     * Source branches that already have an open pull request, so the "recent pushes" banner can
+     * skip them. Hits the {@code (repository_id, status)} index and returns only the branch names.
+     */
+    @Query("SELECT pr.sourceBranch FROM PullRequest pr WHERE pr.repository = :repository AND pr.status = 'OPEN'")
+    List<String> findOpenSourceBranches(@Param("repository") RepositoryGit repository);
 
     /**
      * Highest number issued in this repository, or {@code null} if it has no pull requests yet.
