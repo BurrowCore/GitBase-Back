@@ -7,6 +7,7 @@ import org.os.gitbase.git.dto.BranchSummaryDto;
 import org.os.gitbase.git.dto.CommitDetailDto;
 import org.os.gitbase.git.dto.CommitPageDto;
 import org.os.gitbase.git.dto.CompareDto;
+import org.os.gitbase.git.dto.CreateBranchDto;
 import org.os.gitbase.git.dto.CreateRepositoryDto;
 import org.os.gitbase.git.dto.DirectoryListingDto;
 import org.os.gitbase.git.dto.FileContentDto;
@@ -17,7 +18,6 @@ import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.enums.ActivityType;
 import org.os.gitbase.git.service.ActivityService;
 import org.os.gitbase.git.service.GitService;
-import org.os.gitbase.git.service.PushSyncService;
 import org.os.gitbase.helper.Helper;
 import org.os.gitbase.security.RepositoryAccessGuard;
 import org.springframework.http.ContentDisposition;
@@ -41,14 +41,12 @@ public class GitController {
 
     private final GitService gitService;
     private final ActivityService activityService;
-    private final PushSyncService pushSyncService;
     private final RepositoryAccessGuard accessGuard;
 
     public GitController(GitService gitService, ActivityService activityService,
-                         PushSyncService pushSyncService, RepositoryAccessGuard accessGuard) {
+                         RepositoryAccessGuard accessGuard) {
         this.gitService = gitService;
         this.activityService = activityService;
-        this.pushSyncService = pushSyncService;
         this.accessGuard = accessGuard;
     }
 
@@ -141,9 +139,45 @@ public class GitController {
             @PathVariable String repoName,
             Principal principal) {
         accessGuard.requireReadAccess(username, repoName, principal);
-        pushSyncService.ensureSynced(username, repoName);
         List<BranchSummaryDto> branches = gitService.listBranches(username, repoName);
         return ResponseEntity.ok(ApiResponseEntity.ok(branches, "Branches retrieved"));
+    }
+
+    // -------------------- CREATE BRANCH --------------------
+
+    /**
+     * Creates a branch directly as a git ref — there is no branch table (DECISION-007).
+     * Requires write access, since it mutates the repository.
+     */
+    @PostMapping("/{username}/{repoName}/branches")
+    public ResponseEntity<ApiResponseEntity<BranchSummaryDto>> createBranch(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            @Valid @RequestBody CreateBranchDto request,
+            Principal principal) {
+        accessGuard.requireWriteAccess(username, repoName, principal);
+        BranchSummaryDto branch = gitService.createBranch(
+                username, repoName, request.name(), request.from());
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponseEntity.created(branch, "Branch created"));
+    }
+
+    // -------------------- DELETE BRANCH --------------------
+
+    /**
+     * Deletes a branch ref. The name is a query parameter rather than a path variable because
+     * branch names legitimately contain slashes ({@code feature/login}), which a path variable
+     * cannot carry unambiguously.
+     */
+    @DeleteMapping("/{username}/{repoName}/branches")
+    public ResponseEntity<ApiResponseEntity<Void>> deleteBranch(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            @RequestParam String name,
+            Principal principal) {
+        accessGuard.requireWriteAccess(username, repoName, principal);
+        gitService.deleteBranch(username, repoName, name);
+        return ResponseEntity.ok(ApiResponseEntity.message("Branch deleted", HttpStatus.OK));
     }
 
     // -------------------- COMPARE (PR basis) --------------------
@@ -170,7 +204,6 @@ public class GitController {
             @RequestParam(required = false, defaultValue = "30") int size,
             Principal principal) {
         accessGuard.requireReadAccess(username, repoName, principal);
-        pushSyncService.ensureSynced(username, repoName);
         CommitPageDto commits = gitService.listCommitHistory(username, repoName, ref, path, page, size);
         return ResponseEntity.ok(ApiResponseEntity.ok(commits, "Commit history retrieved"));
     }

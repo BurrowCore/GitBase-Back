@@ -79,7 +79,6 @@ public class PullRequestServiceImpl implements PullRequestService {
     private final GitRepositoryDB repositoryDB;
     private final UserRepository userRepository;
     private final GitService gitService;
-    private final PushSyncService pushSyncService;
     private final ActivityService activityService;
 
     public PullRequestServiceImpl(PullRequestRepository pullRequestRepository,
@@ -87,7 +86,6 @@ public class PullRequestServiceImpl implements PullRequestService {
                                   GitRepositoryDB repositoryDB,
                                   UserRepository userRepository,
                                   GitService gitService,
-                                  PushSyncService pushSyncService,
                                   ActivityService activityService,
                                   @Value("${gitbase.repositories-path:./gitbase/repositories}") String basePath) {
         this.basePath = basePath;
@@ -96,7 +94,6 @@ public class PullRequestServiceImpl implements PullRequestService {
         this.repositoryDB = repositoryDB;
         this.userRepository = userRepository;
         this.gitService = gitService;
-        this.pushSyncService = pushSyncService;
         this.activityService = activityService;
     }
 
@@ -242,9 +239,9 @@ public class PullRequestServiceImpl implements PullRequestService {
 
         String mergeSha;
         try (Repository repo = openRepository(owner, repoName)) {
+            // Git is the source of truth (DECISION-007) — the new merge commit and the moved
+            // branch head need no mirroring; the next read sees them straight from JGit.
             mergeSha = performMerge(repo, pr, merger, message);
-            // Mirror the new commit + moved branch head into the DB while the repo is still open.
-            pushSyncService.reconcile(repo, owner, repoName);
         } catch (IOException e) {
             throw new RuntimeException("Failed to merge pull request #" + number, e);
         }
