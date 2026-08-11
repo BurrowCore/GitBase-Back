@@ -8,11 +8,15 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.os.gitbase.exception.AccessDeniedDomainException;
 import org.os.gitbase.exception.ResourceNotFoundException;
 import org.os.gitbase.git.entity.RepositoryGit;
+import org.os.gitbase.git.entity.Collaborator;
+import org.os.gitbase.git.entity.enums.RepositoryPermission;
+import org.os.gitbase.git.repository.CollaboratorRepository;
 import org.os.gitbase.git.repository.GitRepositoryDB;
 
 import java.security.Principal;
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
@@ -27,6 +31,9 @@ class RepositoryAccessGuardTest {
     @Mock
     private GitRepositoryDB repositoryDB;
 
+    @Mock
+    private CollaboratorRepository collaboratorRepository;
+
     @InjectMocks
     private RepositoryAccessGuard guard;
 
@@ -35,11 +42,21 @@ class RepositoryAccessGuardTest {
         return () -> name;
     }
 
-    private void existing(String owner, String repo, boolean isPrivate) {
+    private RepositoryGit existing(String owner, String repo, boolean isPrivate) {
         RepositoryGit entity = new RepositoryGit();
         entity.setRepoName(repo);
         entity.setPrivate(isPrivate);
         when(repositoryDB.findByOwnerNameAndRepoName(owner, repo)).thenReturn(Optional.of(entity));
+        return entity;
+    }
+
+    /** Gives {@code username} an explicit collaborator grant on the repository. */
+    private void grant(RepositoryGit repo, String username, RepositoryPermission permission) {
+        Collaborator collaborator = new Collaborator();
+        collaborator.setRepository(repo);
+        collaborator.setPermission(permission);
+        when(collaboratorRepository.findByRepositoryAndUsername(repo, username))
+                .thenReturn(Optional.of(collaborator));
     }
 
     // ---------- READ ----------
@@ -110,5 +127,74 @@ class RepositoryAccessGuardTest {
         existing("alice", "repo", true);
         assertThatThrownBy(() -> guard.requireWriteAccess("alice", "repo", principal("bob")))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    // ---------- COLLABORATORS ----------
+
+    @Test
+    void privateRepo_isReadableByAReadCollaborator() {
+        RepositoryGit repo = existing("alice", "repo", true);
+        grant(repo, "bob", RepositoryPermission.READ);
+        assertThatCode(() -> guard.requireReadAccess("alice", "repo", principal("bob")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void readCollaborator_cannotWrite() {
+        // Visible to them, so an honest 403 rather than a masking 404.
+        RepositoryGit repo = existing("alice", "repo", true);
+        grant(repo, "bob", RepositoryPermission.READ);
+        assertThatThrownBy(() -> guard.requireWriteAccess("alice", "repo", principal("bob")))
+                .isInstanceOf(AccessDeniedDomainException.class);
+    }
+
+    @Test
+    void writeCollaborator_canWrite() {
+        RepositoryGit repo = existing("alice", "repo", true);
+        grant(repo, "bob", RepositoryPermission.WRITE);
+        assertThatCode(() -> guard.requireWriteAccess("alice", "repo", principal("bob")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void writeCollaborator_cannotAdminister() {
+        RepositoryGit repo = existing("alice", "repo", false);
+        grant(repo, "bob", RepositoryPermission.WRITE);
+        assertThatThrownBy(() -> guard.requireAdminAccess("alice", "repo", principal("bob")))
+                .isInstanceOf(AccessDeniedDomainException.class);
+    }
+
+    @Test
+    void adminCollaborator_canAdministerButIsNotOwner() {
+        RepositoryGit repo = existing("alice", "repo", false);
+        grant(repo, "bob", RepositoryPermission.ADMIN);
+        assertThatCode(() -> guard.requireAdminAccess("alice", "repo", principal("bob")))
+                .doesNotThrowAnyException();
+        // Deleting the repo and managing collaborators stay owner-only, even for ADMIN.
+        assertThatThrownBy(() -> guard.requireOwner("alice", "repo", principal("bob")))
+                .isInstanceOf(AccessDeniedDomainException.class);
+    }
+
+    @Test
+    void owner_outranksEverything() {
+        existing("alice", "repo", true);
+        assertThatCode(() -> guard.requireOwner("alice", "repo", principal("alice")))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> guard.requireAdminAccess("alice", "repo", principal("alice")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void effectivePermission_reportsTheGrantedLevel() {
+        RepositoryGit repo = existing("alice", "repo", true);
+        grant(repo, "bob", RepositoryPermission.WRITE);
+        assertThat(guard.effectivePermission("alice", "repo", principal("bob")))
+                .contains(RepositoryPermission.WRITE);
+    }
+
+    @Test
+    void effectivePermission_isEmptyForAHiddenPrivateRepo() {
+        existing("alice", "repo", true);
+        assertThat(guard.effectivePermission("alice", "repo", principal("bob"))).isEmpty();
     }
 }
