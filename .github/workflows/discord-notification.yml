@@ -1,0 +1,88 @@
+name: Discord Push Notification - GitBase BackEnd
+
+on:
+  push:
+    branches:
+      - '**'  # Triggers on push to any branch
+
+jobs:
+  notify-discord:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Send Discord Notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # Check if webhook URL is set
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "❌ DISCORD_WEBHOOK_URL secret is not set"
+            exit 1
+          fi
+          
+          # Validate webhook URL format
+          if [[ ! "$DISCORD_WEBHOOK_URL" =~ ^https://discord\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+$ ]]; then
+            echo "❌ Invalid Discord webhook URL format"
+            echo "Expected format: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN"
+            echo "Current URL (first 50 chars): ${DISCORD_WEBHOOK_URL:0:50}..."
+            exit 1
+          fi
+          
+          echo "✅ Webhook URL format is valid"
+          
+          # Get commit info
+          COMMIT_MESSAGE=$(git log -1 --pretty=format:"%s")
+          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an")
+          COMMIT_SHA=$(git log -1 --pretty=format:"%h")
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          REPO_NAME=${GITHUB_REPOSITORY#*/}
+          
+          echo "📝 Commit Message: $COMMIT_MESSAGE"
+          echo "👤 Author: $COMMIT_AUTHOR"
+          echo "🌿 Branch: $BRANCH_NAME"
+          echo "📦 Repository: $REPO_NAME"
+          
+          # Create Discord embed payload
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{
+                 "embeds": [{
+                   "title": "🎨 New Push to GitBase BackEnd Repository",
+                   "color": 15105570,
+                   "fields": [
+                     {
+                       "name": "Repository",
+                       "value": "'"$REPO_NAME"'",
+                       "inline": true
+                     },
+                     {
+                       "name": "Branch",
+                       "value": "'"$BRANCH_NAME"'",
+                       "inline": true
+                     },
+                     {
+                       "name": "Author",
+                       "value": "'"$COMMIT_AUTHOR"'",
+                       "inline": true
+                     },
+                     {
+                       "name": "Commit",
+                       "value": "[`'"$COMMIT_SHA"'`](https://github.com/'"$GITHUB_REPOSITORY"'/commit/'"$GITHUB_SHA"')",
+                       "inline": true
+                     },
+                     {
+                       "name": "Message",
+                       "value": "'"$COMMIT_MESSAGE"'",
+                       "inline": false
+                     }
+                   ],
+                   "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'",
+                   "footer": {
+                     "text": "GitBase BackEnd"
+                   }
+                 }]
+               }' \
+               "$DISCORD_WEBHOOK_URL" 

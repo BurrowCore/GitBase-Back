@@ -1,0 +1,71 @@
+server:
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    excluded-user-agents: git, JGit
+    min-response-size: 2048
+  error:
+    whitelabel:
+      enabled: false
+    include-message: never
+
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope:
+              - openid
+              - profile
+              - email
+            redirect-uri: http://localhost:8880/login/oauth2/code/google
+            client-name: Google
+        provider:
+          google:
+            authorization-uri: https://accounts.google.com/o/oauth2/v2/auth
+            token-uri: https://oauth2.googleapis.com/token
+            user-info-uri: https://www.googleapis.com/oauth2/v2/userinfo
+            user-name-attribute: email
+  datasource:
+    url: jdbc:postgresql://localhost:5432/gitbase_dev
+    username: root
+    password: root
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    show-sql: true
+#  flyway:
+#    clean-disabled: false
+app:
+  oauth2:
+    failure-redirect-uri: http://localhost:5173/login
+    frontend-redirect-uri: http://localhost:5173/dashboard
+
+
+logging:
+  level:
+    org.springframework.web: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    org.flywaydb: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.security.web.csrf: TRACE
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics,env,beans"
+  endpoint:
+    health:
+      show-details: always
+    metrics:
+      access: read_only
+#    flyway:
+#      access: read_only
+    env:
+      access: read_only
+jwt-keys:
+  private_key: ${PRIV_KEY}
+  public_key: ${PUB_KEY}
