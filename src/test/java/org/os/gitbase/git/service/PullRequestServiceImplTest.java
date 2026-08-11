@@ -59,6 +59,7 @@ class PullRequestServiceImplTest {
     private UserRepository userRepository;
     private GitService gitService;
     private ActivityService activityService;
+    private IssueNumberAllocator numberAllocator;
 
     private PullRequestServiceImpl service;
     private RepositoryGit repoEntity;
@@ -72,9 +73,10 @@ class PullRequestServiceImplTest {
         userRepository = mock(UserRepository.class);
         gitService = mock(GitService.class);
         activityService = mock(ActivityService.class);
+        numberAllocator = mock(IssueNumberAllocator.class);
 
         service = new PullRequestServiceImpl(pullRequestRepository, commentRepository, repositoryDB,
-                userRepository, gitService, activityService, tempDir.toString());
+                userRepository, gitService, activityService, numberAllocator, tempDir.toString());
 
         alice = new User();
         alice.setId(UUID.randomUUID());

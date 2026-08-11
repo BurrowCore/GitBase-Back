@@ -80,6 +80,7 @@ public class PullRequestServiceImpl implements PullRequestService {
     private final UserRepository userRepository;
     private final GitService gitService;
     private final ActivityService activityService;
+    private final IssueNumberAllocator numberAllocator;
 
     public PullRequestServiceImpl(PullRequestRepository pullRequestRepository,
                                   PullRequestCommentRepository commentRepository,
@@ -87,6 +88,7 @@ public class PullRequestServiceImpl implements PullRequestService {
                                   UserRepository userRepository,
                                   GitService gitService,
                                   ActivityService activityService,
+                                  IssueNumberAllocator numberAllocator,
                                   @Value("${gitbase.repositories-path:./gitbase/repositories}") String basePath) {
         this.basePath = basePath;
         this.pullRequestRepository = pullRequestRepository;
@@ -95,6 +97,7 @@ public class PullRequestServiceImpl implements PullRequestService {
         this.userRepository = userRepository;
         this.gitService = gitService;
         this.activityService = activityService;
+        this.numberAllocator = numberAllocator;
     }
 
     // ────────────────────────────── create ──────────────────────────────
@@ -152,15 +155,13 @@ public class PullRequestServiceImpl implements PullRequestService {
     }
 
     /**
-     * Next per-repository pull-request number.
-     *
-     * <p>Read-then-increment races under concurrent creates; the unique constraint on
-     * {@code (repository_id, number)} is what actually guarantees correctness — a loser gets a
-     * constraint violation rather than a duplicate number.
+     * Next per-repository number, drawn from the sequence <b>shared with issues</b> so a repo
+     * reads #1, #2, #3 whatever the type — the behaviour GitHub and Gitea both have, and what
+     * makes a bare "#12" reference unambiguous. The allocator locks the repository row, so
+     * concurrent creates cannot claim the same number.
      */
     private int nextNumber(RepositoryGit repository) {
-        Integer max = pullRequestRepository.findMaxNumber(repository);
-        return (max == null ? 0 : max) + 1;
+        return numberAllocator.allocate(repository);
     }
 
     // ────────────────────────────── read ──────────────────────────────

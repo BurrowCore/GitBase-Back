@@ -33,6 +33,18 @@ public class RepositoryGit {
     @JsonProperty("isPrivate")
     private boolean isPrivate;
 
+    /**
+     * Highest #number handed out in this repository. Issues and pull requests draw from this ONE
+     * sequence, so a repo reads #1, #2, #3 regardless of type — the behaviour GitHub and Gitea both
+     * have, and what makes a bare "#12" reference unambiguous.
+     *
+     * <p>Nullable on purpose: {@code ddl-auto: update} cannot add a NOT NULL column to a table that
+     * already has rows, so the column is added nullable with a default and the allocator treats a
+     * null as zero. It is self-healing anyway — it reconciles against the real maxima on each call.
+     */
+    @Column(name = "last_issue_number", columnDefinition = "integer default 0")
+    private Integer lastIssueNumber = 0;
+
     @CreatedDate
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

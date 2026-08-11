@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.os.gitbase.constant.Constant.*;
 
@@ -100,9 +101,13 @@ public class GitController {
             @PathVariable String username,
             Principal principal) {
         List<RepositoryTreeDto> repos = gitService.listRepositories(username);
-        // Owners see everything; others only see public repositories.
+        // Owners see everything. Everyone else sees public repos, plus any private repo they hold
+        // a collaborator grant on — resolved in one query rather than a check per row.
         if (!accessGuard.isOwner(username, principal)) {
-            repos = repos.stream().filter(r -> !r.isPrivate()).toList();
+            Set<String> visiblePrivate = accessGuard.collaboratingRepoNames(username, principal);
+            repos = repos.stream()
+                    .filter(r -> !r.isPrivate() || visiblePrivate.contains(r.getRepoName()))
+                    .toList();
         }
         return ResponseEntity.ok(ApiResponseEntity.ok(repos, "Repositories retrieved"));
     }
@@ -276,12 +281,11 @@ public class GitController {
             @PathVariable String repoName,
             Principal principal) {
 
+        // Deleting is owner-only — not even an ADMIN collaborator may do it (matches Gitea).
+        accessGuard.requireOwner(username, repoName, principal);
         String authUser = Helper.removeAtSymbolAndFollowing(principal.getName());
-        if (!authUser.equals(username)) {
-            throw new AccessDeniedDomainException("You can only delete your own repositories");
-        }
 
-        gitService.deleteRepository(authUser, repoName);
+        gitService.deleteRepository(username, repoName);
         activityService.logActivity(ActivityType.REPO_DELETED, authUser, repoName,
                 "[ " + repoName + " ] Repository deleted");
 
