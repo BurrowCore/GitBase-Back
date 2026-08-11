@@ -41,6 +41,7 @@ import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.RepositoryGit;
 import org.os.gitbase.git.hook.CodeReviewHook;
 import org.os.gitbase.git.repository.GitRepositoryDB;
+import org.os.gitbase.exception.ConflictException;
 import org.os.gitbase.exception.ResourceNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -522,6 +523,113 @@ public class GitServiceImpl implements GitService {
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to read file " + path + " in " + username + "/" + repoName, e);
+        }
+    }
+
+    // ────────────────────────── Branch CRUD (git refs only) ──────────────────────────
+
+    /**
+     * Creates {@code refs/heads/<branchName>} pointing at {@code fromRef}.
+     *
+     * <p>There is no branch table — the ref *is* the branch (DECISION-007). The update is a
+     * compare-and-swap against "must not already exist", so two concurrent creates cannot both win.
+     */
+    @Override
+    public BranchSummaryDto createBranch(String username, String repoName, String branchName, String fromRef) {
+        validateUsername(username);
+        validateRepositoryName(repoName);
+
+        String name = branchName == null ? "" : branchName.trim();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("Branch name is required");
+        }
+        // Let git decide what a legal ref name is rather than inventing our own rules.
+        if (!Repository.isValidRefName(Constants.R_HEADS + name)) {
+            throw new IllegalArgumentException("Invalid branch name: " + name);
+        }
+        if (!repositoryExists(username, repoName)) {
+            throw new ResourceNotFoundException("Repository not found: " + username + "/" + repoName);
+        }
+
+        String repoPath = Paths.get(repositoriesPath, username, repoName + ".git").toString();
+        try (Repository repo = new FileRepositoryBuilder()
+                .setGitDir(new File(repoPath))
+                .setBare()
+                .build()) {
+
+            if (repo.exactRef(Constants.R_HEADS + name) != null) {
+                throw new ConflictException("Branch already exists: " + name);
+            }
+
+            ObjectId startPoint = resolveRef(repo, fromRef);
+            if (startPoint == null) {
+                throw new ResourceNotFoundException(StringUtils.hasText(fromRef)
+                        ? "Start point not found: " + fromRef
+                        : "Repository is empty — nothing to branch from");
+            }
+
+            RefUpdate update = repo.updateRef(Constants.R_HEADS + name);
+            update.setNewObjectId(startPoint);
+            // Zero id as the expected old value means "create only" — fails if it already exists.
+            update.setExpectedOldObjectId(ObjectId.zeroId());
+            update.setRefLogMessage("branch: created from " + (StringUtils.hasText(fromRef) ? fromRef : "HEAD"), false);
+
+            RefUpdate.Result result = update.update();
+            if (result != RefUpdate.Result.NEW && result != RefUpdate.Result.FAST_FORWARD) {
+                throw new ConflictException("Could not create branch " + name + " (" + result + ")");
+            }
+
+            String sha = startPoint.getName();
+            return new BranchSummaryDto(name, sha, sha.substring(0, 7), false);
+
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create branch " + name + " in " + username + "/" + repoName, e);
+        }
+    }
+
+    /** Deletes {@code refs/heads/<branchName>}. Refuses to delete the branch HEAD points at. */
+    @Override
+    public void deleteBranch(String username, String repoName, String branchName) {
+        validateUsername(username);
+        validateRepositoryName(repoName);
+
+        String name = branchName == null ? "" : branchName.trim();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("Branch name is required");
+        }
+        if (!repositoryExists(username, repoName)) {
+            throw new ResourceNotFoundException("Repository not found: " + username + "/" + repoName);
+        }
+
+        String repoPath = Paths.get(repositoriesPath, username, repoName + ".git").toString();
+        try (Repository repo = new FileRepositoryBuilder()
+                .setGitDir(new File(repoPath))
+                .setBare()
+                .build()) {
+
+            Ref existing = repo.exactRef(Constants.R_HEADS + name);
+            if (existing == null) {
+                throw new ResourceNotFoundException("Branch not found: " + name);
+            }
+
+            // Deleting the branch HEAD points at would leave the repository without a usable default.
+            Ref head = repo.exactRef(Constants.HEAD);
+            if (head != null && head.isSymbolic() && head.getTarget() != null
+                    && head.getTarget().getName().equals(Constants.R_HEADS + name)) {
+                throw new ConflictException("Cannot delete the default branch: " + name);
+            }
+
+            RefUpdate update = repo.updateRef(Constants.R_HEADS + name);
+            update.setForceUpdate(true);
+            update.setRefLogMessage("branch: deleted", false);
+
+            RefUpdate.Result result = update.delete();
+            if (result != RefUpdate.Result.FORCED && result != RefUpdate.Result.NEW) {
+                throw new ConflictException("Could not delete branch " + name + " (" + result + ")");
+            }
+
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to delete branch " + name + " in " + username + "/" + repoName, e);
         }
     }
 

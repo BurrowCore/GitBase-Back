@@ -32,6 +32,15 @@ public interface GitService {
     RawFileDto getRawFile(String username, String repoName, String ref, String path);
 
     /**
+     * Creates a branch at {@code fromRef} (defaults to HEAD). Operates directly on git refs —
+     * there is no branch table (DECISION-007).
+     */
+    BranchSummaryDto createBranch(String username, String repoName, String branchName, String fromRef);
+
+    /** Deletes a branch ref. The repository's default branch cannot be deleted. */
+    void deleteBranch(String username, String repoName, String branchName);
+
+    /**
      * GitHub-style listing of one directory level at the given path/ref, where each entry
      * carries the commit that last modified it, plus the repo's latest commit on the ref.
      */

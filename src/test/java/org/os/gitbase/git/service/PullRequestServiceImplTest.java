@@ -58,7 +58,6 @@ class PullRequestServiceImplTest {
     private GitRepositoryDB repositoryDB;
     private UserRepository userRepository;
     private GitService gitService;
-    private PushSyncService pushSyncService;
     private ActivityService activityService;
 
     private PullRequestServiceImpl service;
@@ -72,11 +71,10 @@ class PullRequestServiceImplTest {
         repositoryDB = mock(GitRepositoryDB.class);
         userRepository = mock(UserRepository.class);
         gitService = mock(GitService.class);
-        pushSyncService = mock(PushSyncService.class);
         activityService = mock(ActivityService.class);
 
         service = new PullRequestServiceImpl(pullRequestRepository, commentRepository, repositoryDB,
-                userRepository, gitService, pushSyncService, activityService, tempDir.toString());
+                userRepository, gitService, activityService, tempDir.toString());
 
         alice = new User();
         alice.setId(UUID.randomUUID());
