@@ -14,11 +14,16 @@ import org.os.gitbase.git.dto.FileContentDto;
 import org.os.gitbase.git.dto.FileTreeNode;
 import org.os.gitbase.git.dto.RawFileDto;
 import org.os.gitbase.git.dto.RepositoryInfo;
+import org.os.gitbase.git.dto.RepositoryPermissionsDto;
 import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.enums.ActivityType;
 import org.os.gitbase.git.service.ActivityService;
 import org.os.gitbase.git.service.GitService;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.git.service.RepositoryProvisioningService;
+import org.os.gitbase.git.service.RepositoryTransferService;
+import org.os.gitbase.git.dto.TransferRepositoryDto;
+import org.os.gitbase.git.dto.TransferRepositoryResultDto;
+import org.os.gitbase.security.CurrentUserResolver;
 import org.os.gitbase.security.RepositoryAccessGuard;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -43,25 +48,37 @@ public class GitController {
     private final GitService gitService;
     private final ActivityService activityService;
     private final RepositoryAccessGuard accessGuard;
+    private final CurrentUserResolver currentUser;
+    private final RepositoryProvisioningService provisioningService;
+    private final RepositoryTransferService transferService;
 
     public GitController(GitService gitService, ActivityService activityService,
-                         RepositoryAccessGuard accessGuard) {
+                         RepositoryAccessGuard accessGuard, CurrentUserResolver currentUser,
+                         RepositoryProvisioningService provisioningService,
+                         RepositoryTransferService transferService) {
         this.gitService = gitService;
         this.activityService = activityService;
         this.accessGuard = accessGuard;
+        this.currentUser = currentUser;
+        this.provisioningService = provisioningService;
+        this.transferService = transferService;
     }
 
     // -------------------- CREATE REPOSITORY --------------------
     @PostMapping(CREATE_REPOSITORY)
     public ResponseEntity<ApiResponseEntity<Map<String, Object>>> createRepository(
-            @Valid @RequestBody CreateRepositoryDto request) {
+            @Valid @RequestBody CreateRepositoryDto request,
+            Principal principal) {
 
-        gitService.createRepository(request.getUsername(), request.getRepoName(), request.isPrivate());
-
-        String branch = (request.getDefaultBranch() == null || request.getDefaultBranch().isEmpty())
-                ? "main" : request.getDefaultBranch();
-        String remoteUrl = "http://localhost:8880/api/v1/gitbase/"
-                + request.getUsername() + "/" + request.getRepoName() + ".git";
+        // The owner is the caller, or an organization they may create in (gitbase's POST /user/repos
+        // and /orgs/{org}/repos). The body's username used to be trusted blindly, which let any
+        // user create repositories inside someone else's namespace.
+        String branch = (request.getDefaultBranch() == null || request.getDefaultBranch().isBlank())
+                ? "main" : request.getDefaultBranch().trim();
+        String owner = provisioningService.create(currentUser.requireUsername(principal), request.getUsername(),
+                request.getRepoName(), request.isPrivate(), branch);
+        // The JGit servlet path — the old /api/v1/gitbase/ smart-HTTP controller no longer exists.
+        String remoteUrl = "http://localhost:8880/gitbase/" + owner + "/" + request.getRepoName() + ".git";
 
         List<String> gitCommands = Arrays.asList(
                 "git init",
@@ -77,7 +94,7 @@ public class GitController {
         data.put("remoteUrl", remoteUrl);
         data.put("gitCommands", gitCommands);
 
-        activityService.logActivity(ActivityType.REPO_CREATED, request.getUsername(), request.getRepoName(),
+        activityService.logActivity(ActivityType.REPO_CREATED, owner, request.getRepoName(),
                 "[ " + request.getRepoName() + " ] Repository created successfully");
 
         return ResponseEntity.status(HttpStatus.CREATED)
@@ -92,6 +109,9 @@ public class GitController {
             Principal principal) {
         accessGuard.requireReadAccess(username, repoName, principal);
         RepositoryInfo info = gitService.getRepositoryInfo(username, repoName);
+        info.setPermissions(RepositoryPermissionsDto.of(
+                accessGuard.effectivePermission(username, repoName, principal),
+                accessGuard.isOwner(username, principal)));
         return ResponseEntity.ok(ApiResponseEntity.ok(info, "Repository info retrieved"));
     }
 
@@ -101,14 +121,13 @@ public class GitController {
             @PathVariable String username,
             Principal principal) {
         List<RepositoryTreeDto> repos = gitService.listRepositories(username);
-        // Owners see everything. Everyone else sees public repos, plus any private repo they hold
-        // a collaborator grant on — resolved in one query rather than a check per row.
-        if (!accessGuard.isOwner(username, principal)) {
-            Set<String> visiblePrivate = accessGuard.collaboratingRepoNames(username, principal);
-            repos = repos.stream()
-                    .filter(r -> !r.isPrivate() || visiblePrivate.contains(r.getRepoName()))
-                    .toList();
-        }
+        // Owners (and organization teams covering everything) see every repo. Everyone else sees
+        // public repos plus the private ones granted to them directly or through a team — resolved
+        // in a fixed number of queries rather than a check per row.
+        RepositoryAccessGuard.PrivateRepoVisibility visible = accessGuard.privateRepoVisibility(username, principal);
+        repos = repos.stream()
+                .filter(r -> !r.isPrivate() || visible.canSee(r.getRepoName()))
+                .toList();
         return ResponseEntity.ok(ApiResponseEntity.ok(repos, "Repositories retrieved"));
     }
 
@@ -274,6 +293,23 @@ public class GitController {
                 .body(raw.content());
     }
 
+    // -------------------- TRANSFER REPOSITORY --------------------
+    /**
+     * Moves the repository into an organization. Owner-only, like deletion; the caller must also be
+     * allowed to create repositories in the target organization.
+     */
+    @PostMapping("/{username}/{repoName}/transfer")
+    public ResponseEntity<ApiResponseEntity<TransferRepositoryResultDto>> transferRepository(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            @Valid @RequestBody TransferRepositoryDto request,
+            Principal principal) {
+        accessGuard.requireOwner(username, repoName, principal);
+        TransferRepositoryResultDto result = transferService.transfer(username, repoName, request.newOwner(),
+                currentUser.requireUsername(principal));
+        return ResponseEntity.ok(ApiResponseEntity.ok(result, "Repository transferred to " + result.owner()));
+    }
+
     // -------------------- DELETE REPOSITORY --------------------
     @DeleteMapping("/{username}/{repoName}")
     public ResponseEntity<ApiResponseEntity<Void>> deleteRepository(
@@ -281,9 +317,9 @@ public class GitController {
             @PathVariable String repoName,
             Principal principal) {
 
-        // Deleting is owner-only — not even an ADMIN collaborator may do it (matches Gitea).
+        // Deleting is owner-only — not even an ADMIN collaborator may do it.
         accessGuard.requireOwner(username, repoName, principal);
-        String authUser = Helper.removeAtSymbolAndFollowing(principal.getName());
+        String authUser = currentUser.requireUsername(principal);
 
         gitService.deleteRepository(username, repoName);
         activityService.logActivity(ActivityType.REPO_DELETED, authUser, repoName,

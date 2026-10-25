@@ -3,8 +3,9 @@ package org.os.gitbase.git.controller;
 import jakarta.validation.Valid;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.git.dto.*;
+import org.os.gitbase.git.entity.enums.RepositoryPermission;
 import org.os.gitbase.git.service.PullRequestService;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.security.CurrentUserResolver;
 import org.os.gitbase.security.RepositoryAccessGuard;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -23,10 +24,10 @@ import static org.os.gitbase.constant.Constant.GITBASE_MAPPING_REQUEST;
  * under {@code /api/v1/web/gitbase/...}. Consistency won; the spec has been annotated.
  *
  * <p><b>Authorization.</b> Reading a pull request requires read access to its repository, so
- * private repositories stay private. Merging requires write access (owner-only in the current
- * permission model). Closing and reopening additionally require the caller to be the pull-request
- * author or the repository owner — that rule depends on pull-request state, so it lives in the
- * service rather than here.
+ * private repositories stay private. Merging requires write access (owner, or a WRITE/ADMIN
+ * collaborator). Closing and reopening require the caller to be the pull-request author or to hold
+ * write access — the author part depends on pull-request state, so the controller resolves the
+ * permission and the service applies the rule (the same split the issue endpoints use).
  */
 @RestController
 @RequestMapping(GITBASE_MAPPING_REQUEST + "/{username}/{repoName}/pulls")
@@ -35,9 +36,13 @@ public class PullRequestController {
     private final PullRequestService pullRequestService;
     private final RepositoryAccessGuard accessGuard;
 
-    public PullRequestController(PullRequestService pullRequestService, RepositoryAccessGuard accessGuard) {
+    private final CurrentUserResolver currentUser;
+
+    public PullRequestController(PullRequestService pullRequestService, RepositoryAccessGuard accessGuard,
+                                 CurrentUserResolver currentUser) {
         this.pullRequestService = pullRequestService;
         this.accessGuard = accessGuard;
+        this.currentUser = currentUser;
     }
 
     // -------------------- LIST --------------------
@@ -129,7 +134,8 @@ public class PullRequestController {
             @PathVariable int number,
             Principal principal) {
         accessGuard.requireReadAccess(username, repoName, principal);
-        PullRequestDto pr = pullRequestService.close(username, repoName, number, actor(principal));
+        PullRequestDto pr = pullRequestService.close(username, repoName, number, actor(principal),
+                hasWriteAccess(username, repoName, principal));
         return ResponseEntity.ok(ApiResponseEntity.ok(pr, "Pull request closed"));
     }
 
@@ -141,7 +147,8 @@ public class PullRequestController {
             @PathVariable int number,
             Principal principal) {
         accessGuard.requireReadAccess(username, repoName, principal);
-        PullRequestDto pr = pullRequestService.reopen(username, repoName, number, actor(principal));
+        PullRequestDto pr = pullRequestService.reopen(username, repoName, number, actor(principal),
+                hasWriteAccess(username, repoName, principal));
         return ResponseEntity.ok(ApiResponseEntity.ok(pr, "Pull request reopened"));
     }
 
@@ -172,8 +179,15 @@ public class PullRequestController {
                 .body(ApiResponseEntity.created(comment, "Comment added"));
     }
 
-    /** The acting username, normalised the same way the rest of the app does (email → local part). */
+    /** The acting user's stored username (never derived from the email). */
     private String actor(Principal principal) {
-        return Helper.removeAtSymbolAndFollowing(principal.getName());
+        return currentUser.requireUsername(principal);
+    }
+
+    /** Resolved once per request and handed to the service, which cannot see the Principal. */
+    private boolean hasWriteAccess(String username, String repoName, Principal principal) {
+        return accessGuard.effectivePermission(username, repoName, principal)
+                .filter(permission -> permission.atLeast(RepositoryPermission.WRITE))
+                .isPresent();
     }
 }

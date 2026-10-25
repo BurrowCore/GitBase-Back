@@ -2,8 +2,10 @@ package org.os.gitbase.exception;
 
 import lombok.extern.slf4j.Slf4j;
 import org.os.gitbase.common.ApiResponseEntity;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -19,8 +21,9 @@ import java.util.stream.Collectors;
  * <p>Every error is returned in the canonical {@link ApiResponseEntity} envelope so the
  * frontend can rely on a single error shape: {@code {success:false, error, message, httpStatus}}.
  *
- * <p>The Git smart-HTTP endpoints ({@code /api/v1/gitbase/**}) deliberately bypass this
- * handler — they stream raw pkt-line protocol data and manage their own status codes.
+ * <p>The Git smart-HTTP endpoints ({@code /gitbase/**}, served by the JGit {@code GitServlet})
+ * deliberately bypass this handler — they stream raw pkt-line protocol data and manage their own
+ * status codes.
  */
 @RestControllerAdvice
 @Slf4j
@@ -76,6 +79,20 @@ public class GlobalExceptionHandler {
     }
 
     /** Path-traversal / security guard trips → 403, with a generic message (no internals leaked). */
+    /** A concurrent update won the race (JPA {@code @Version}) — the client should reload and retry. */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponseEntity<Void>> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.debug("Concurrent modification: {}", ex.getMessage());
+        return build(HttpStatus.CONFLICT, "CONFLICT", "This item was changed by someone else. Reload and try again.");
+    }
+
+    /** The request carried no usable identity (e.g. a principal with no matching account). */
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ApiResponseEntity<Void>> handleAuthentication(AuthenticationException ex) {
+        log.debug("Unauthenticated: {}", ex.getMessage());
+        return build(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Authentication required");
+    }
+
     @ExceptionHandler(SecurityException.class)
     public ResponseEntity<ApiResponseEntity<Void>> handleSecurity(SecurityException ex) {
         log.warn("Security exception: {}", ex.getMessage());

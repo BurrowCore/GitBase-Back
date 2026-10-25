@@ -1,17 +1,11 @@
 package org.os.gitbase.git.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.eclipse.jgit.lib.CommitBuilder;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.Ref;
-import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.merge.MergeStrategy;
-import org.eclipse.jgit.merge.ResolveMerger;
-import org.eclipse.jgit.merge.ThreeWayMerger;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
@@ -26,6 +20,7 @@ import org.os.gitbase.git.entity.PullRequest;
 import org.os.gitbase.git.entity.PullRequestComment;
 import org.os.gitbase.git.entity.RepositoryGit;
 import org.os.gitbase.git.entity.enums.ActivityType;
+import org.os.gitbase.git.entity.enums.MergeMethod;
 import org.os.gitbase.git.entity.enums.PullRequestStatus;
 import org.os.gitbase.git.repository.GitRepositoryDB;
 import org.os.gitbase.git.repository.PullRequestCommentRepository;
@@ -34,9 +29,11 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionOperations;
 
 import java.io.File;
 import java.io.IOException;
@@ -48,6 +45,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -58,10 +56,9 @@ import java.util.Set;
  * <ul>
  *   <li><b>Git is the source of truth.</b> Branch existence, commit counts and diffs are read live
  *       from JGit; the database stores only the pull-request record itself (ADR-004).</li>
- *   <li><b>Merges happen in-core.</b> Repositories are bare, so there is no worktree for
- *       {@code git merge} to operate on. We run a three-way merge in memory, write the resulting
- *       tree and a merge commit straight into the object database, then move the branch ref with a
- *       compare-and-swap so a concurrent push cannot be silently overwritten.</li>
+ *   <li><b>Merges happen in-core.</b> The git work (merge / squash / rebase, all in memory on the
+ *       bare repository, ending in a compare-and-swap ref update) lives in
+ *       {@link PullRequestMergeEngine}; this class owns the pull-request record around it.</li>
  * </ul>
  */
 @Service
@@ -81,6 +78,11 @@ public class PullRequestServiceImpl implements PullRequestService {
     private final GitService gitService;
     private final ActivityService activityService;
     private final IssueNumberAllocator numberAllocator;
+    private final PullRequestMergeEngine mergeEngine;
+    private final ClosingKeywordParser closingKeywordParser;
+    private final ClosingIssueResolver closingIssueResolver;
+    private final ApplicationEventPublisher events;
+    private final TransactionOperations transactions;
 
     public PullRequestServiceImpl(PullRequestRepository pullRequestRepository,
                                   PullRequestCommentRepository commentRepository,
@@ -89,6 +91,11 @@ public class PullRequestServiceImpl implements PullRequestService {
                                   GitService gitService,
                                   ActivityService activityService,
                                   IssueNumberAllocator numberAllocator,
+                                  PullRequestMergeEngine mergeEngine,
+                                  ClosingKeywordParser closingKeywordParser,
+                                  ClosingIssueResolver closingIssueResolver,
+                                  ApplicationEventPublisher events,
+                                  TransactionOperations transactions,
                                   @Value("${gitbase.repositories-path:./gitbase/repositories}") String basePath) {
         this.basePath = basePath;
         this.pullRequestRepository = pullRequestRepository;
@@ -98,6 +105,11 @@ public class PullRequestServiceImpl implements PullRequestService {
         this.gitService = gitService;
         this.activityService = activityService;
         this.numberAllocator = numberAllocator;
+        this.mergeEngine = mergeEngine;
+        this.closingKeywordParser = closingKeywordParser;
+        this.closingIssueResolver = closingIssueResolver;
+        this.events = events;
+        this.transactions = transactions;
     }
 
     // ────────────────────────────── create ──────────────────────────────
@@ -156,7 +168,7 @@ public class PullRequestServiceImpl implements PullRequestService {
 
     /**
      * Next per-repository number, drawn from the sequence <b>shared with issues</b> so a repo
-     * reads #1, #2, #3 whatever the type — the behaviour GitHub and Gitea both have, and what
+     * reads #1, #2, #3 whatever the type — which is what
      * makes a bare "#12" reference unambiguous. The allocator locks the repository row, so
      * concurrent creates cannot claim the same number.
      */
@@ -220,127 +232,93 @@ public class PullRequestServiceImpl implements PullRequestService {
 
     // ────────────────────────────── merge ──────────────────────────────
 
+    /** What the git work needs, captured in the read transaction so none is held during it. */
+    private record MergePlan(Long pullRequestId, Long version, PullRequestMergeEngine.MergeRequest request) {
+    }
+
+    /**
+     * Three steps, deliberately <b>not</b> one transaction (ADR-004 S6): a short read transaction
+     * validates and captures the plan; the git work runs with no connection held; a short write
+     * transaction records the result. The engine is idempotent (an already-landed source is a
+     * no-op for every method), and the {@code @Version} check makes the losing side of two
+     * concurrent merges a 409 rather than a second audit record.
+     */
     @Override
-    @Transactional
     public MergeResultDto merge(String owner, String repoName, int number, String actor, MergePullRequestDto request) {
-        PullRequest pr = requirePullRequest(owner, repoName, number);
-        requireOpen(pr, "merge");
+        MergeMethod method = MergeMethod.parse(request == null ? null : request.mergeMethod());
 
-        String method = request == null || request.mergeMethod() == null || request.mergeMethod().isBlank()
-                ? "merge" : request.mergeMethod().trim().toLowerCase();
-        if (!method.equals("merge")) {
-            throw new IllegalArgumentException(
-                    "Only the 'merge' strategy is supported in this version (got '" + method + "')");
-        }
+        MergePlan plan = transactions.execute(status -> {
+            PullRequest pr = requirePullRequest(owner, repoName, number);
+            requireOpen(pr, "merge");
+            User merger = requireUser(actor);
+            return new MergePlan(pr.getId(), pr.getVersion(), new PullRequestMergeEngine.MergeRequest(
+                    pr.getSourceBranch(), pr.getTargetBranch(), method, pr.getNumber(), pr.getTitle(),
+                    request == null ? null : request.commitMessage(),
+                    identityOf(pr.getAuthor() != null ? pr.getAuthor() : merger), identityOf(merger),
+                    request == null ? null : request.expectedHeadSha()));
+        });
 
-        User merger = requireUser(actor);
-        String message = (request != null && request.commitMessage() != null && !request.commitMessage().isBlank())
-                ? request.commitMessage().trim()
-                : "Merge pull request #" + pr.getNumber() + ": " + pr.getTitle();
-
-        String mergeSha;
+        String newTip;
+        boolean intoDefaultBranch;
         try (Repository repo = openRepository(owner, repoName)) {
-            // Git is the source of truth (DECISION-007) — the new merge commit and the moved
-            // branch head need no mirroring; the next read sees them straight from JGit.
-            mergeSha = performMerge(repo, pr, merger, message);
+            // Git is the source of truth (DECISION-007) — the new commits and the moved branch
+            // head need no mirroring; the next read sees them straight from JGit.
+            newTip = mergeEngine.merge(repo, plan.request());
+            intoDefaultBranch = plan.request().targetBranch().equals(defaultBranchOf(repo));
         } catch (IOException e) {
             throw new RuntimeException("Failed to merge pull request #" + number, e);
         }
 
-        pr.setStatus(PullRequestStatus.MERGED);
-        pr.setMergedAt(LocalDateTime.now());
-        pr.setMergedBy(merger);
-        pr.setMergeCommitSha(mergeSha);
-        pullRequestRepository.save(pr);
-
-        activityService.logActivity(ActivityType.PULL_REQUEST, actor, repoName,
-                "[ " + repoName + " ] Merged pull request #" + pr.getNumber() + ": " + pr.getTitle());
-
-        return new MergeResultDto(true, mergeSha, "Pull request successfully merged");
+        return transactions.execute(status -> recordMerge(plan, owner, repoName, actor, method, newTip,
+                intoDefaultBranch));
     }
 
-    /**
-     * Runs the three-way merge and moves the target branch.
-     *
-     * @return SHA of the resulting merge commit (or of the existing tip when already up to date)
-     * @throws ConflictException when the merge cannot be applied cleanly
-     */
-    private String performMerge(Repository repo, PullRequest pr, User merger, String message) throws IOException {
-        String targetRef = Constants.R_HEADS + pr.getTargetBranch();
-        ObjectId targetId = repo.resolve(targetRef);
-        ObjectId sourceId = repo.resolve(Constants.R_HEADS + pr.getSourceBranch());
-
-        if (targetId == null) {
-            throw new ResourceNotFoundException("Target branch no longer exists: " + pr.getTargetBranch());
-        }
-        if (sourceId == null) {
-            throw new ResourceNotFoundException("Source branch no longer exists: " + pr.getSourceBranch());
+    private MergeResultDto recordMerge(MergePlan plan, String owner, String repoName, String actor,
+                                       MergeMethod method, String newTip, boolean intoDefaultBranch) {
+        PullRequest pr = pullRequestRepository.findById(plan.pullRequestId())
+                .orElseThrow(() -> new ResourceNotFoundException("Pull request no longer exists"));
+        if (pr.getStatus() != PullRequestStatus.OPEN || !Objects.equals(pr.getVersion(), plan.version())) {
+            throw new ConflictException("Pull request #" + pr.getNumber() + " was merged or changed concurrently");
         }
 
-        try (RevWalk walk = new RevWalk(repo)) {
-            RevCommit targetCommit = walk.parseCommit(targetId);
-            RevCommit sourceCommit = walk.parseCommit(sourceId);
+        pr.setStatus(PullRequestStatus.MERGED);
+        pr.setMergedAt(LocalDateTime.now());
+        pr.setMergedBy(requireUser(actor));
+        pr.setMergeCommitSha(newTip);
+        pr.setMergeMethod(method);
+        pullRequestRepository.save(pr);
 
-            // Nothing to do — the source is already contained in the target.
-            if (walk.isMergedInto(sourceCommit, targetCommit)) {
-                return targetCommit.getName();
-            }
+        String verb = switch (method) {
+            case MERGE -> "Merged";
+            case SQUASH -> "Squashed and merged";
+            case REBASE -> "Rebased and merged";
+        };
+        activityService.logActivity(ActivityType.PULL_REQUEST, actor, repoName,
+                "[ " + repoName + " ] " + verb + " pull request #" + pr.getNumber() + ": " + pr.getTitle());
 
-            // inCore=true: merge entirely in memory, which is the only option for a bare repo.
-            ThreeWayMerger merger3 = (ThreeWayMerger) MergeStrategy.RECURSIVE.newMerger(repo, true);
-            boolean clean = merger3.merge(targetCommit, sourceCommit);
-            if (!clean) {
-                List<String> conflicts = merger3 instanceof ResolveMerger rm
-                        ? new ArrayList<>(rm.getUnmergedPaths())
-                        : List.of();
-                throw new ConflictException(
-                        "Merge conflict between " + pr.getSourceBranch() + " and " + pr.getTargetBranch(),
-                        conflicts);
-            }
+        // Handled after this transaction commits — see PullRequestMergedEvent.
+        events.publishEvent(new PullRequestMergedEvent(pr.getRepository().getId(), owner, repoName,
+                pr.getNumber(), actor, intoDefaultBranch,
+                closingKeywordParser.closedIssueNumbers(pr.getTitle(), pr.getDescription())));
 
-            PersonIdent ident = new PersonIdent(
-                    merger.getName() != null ? merger.getName() : "gitbase",
-                    merger.getEmail() != null ? merger.getEmail() : "noreply@gitbase.local");
+        return new MergeResultDto(true, newTip, method.wireName(), "Pull request successfully merged");
+    }
 
-            CommitBuilder commitBuilder = new CommitBuilder();
-            commitBuilder.setTreeId(merger3.getResultTreeId());
-            commitBuilder.setParentIds(targetCommit.getId(), sourceCommit.getId());
-            commitBuilder.setAuthor(ident);
-            commitBuilder.setCommitter(ident);
-            commitBuilder.setMessage(message);
-
-            ObjectId mergeCommitId;
-            try (ObjectInserter inserter = repo.newObjectInserter()) {
-                mergeCommitId = inserter.insert(commitBuilder);
-                inserter.flush();
-            }
-
-            // Compare-and-swap: if someone pushed to the target since we read its tip, fail loudly
-            // rather than clobbering their work.
-            RefUpdate refUpdate = repo.updateRef(targetRef);
-            refUpdate.setNewObjectId(mergeCommitId);
-            refUpdate.setExpectedOldObjectId(targetId);
-            refUpdate.setRefLogMessage("merge pull request #" + pr.getNumber(), false);
-
-            RefUpdate.Result result = refUpdate.update();
-            if (result != RefUpdate.Result.FAST_FORWARD
-                    && result != RefUpdate.Result.NEW
-                    && result != RefUpdate.Result.FORCED) {
-                throw new ConflictException(
-                        "Could not update " + pr.getTargetBranch() + " (" + result + ") — it may have moved. Try again.");
-            }
-            return mergeCommitId.getName();
-        }
+    /** Commit identity for a user; falls back to a no-reply address so git never sees a null email. */
+    private static PersonIdent identityOf(User user) {
+        return new PersonIdent(
+                user.getName() != null ? user.getName() : "gitbase",
+                user.getEmail() != null ? user.getEmail() : "noreply@gitbase.local");
     }
 
     // ────────────────────────────── close / reopen ──────────────────────────────
 
     @Override
     @Transactional
-    public PullRequestDto close(String owner, String repoName, int number, String actor) {
+    public PullRequestDto close(String owner, String repoName, int number, String actor, boolean hasWriteAccess) {
         PullRequest pr = requirePullRequest(owner, repoName, number);
         requireOpen(pr, "close");
-        requireAuthorOrOwner(pr, owner, actor, "close");
+        requireAuthorOrWriter(pr, actor, hasWriteAccess, "close");
 
         pr.setStatus(PullRequestStatus.CLOSED);
         pr.setClosedAt(LocalDateTime.now());
@@ -354,13 +332,13 @@ public class PullRequestServiceImpl implements PullRequestService {
 
     @Override
     @Transactional
-    public PullRequestDto reopen(String owner, String repoName, int number, String actor) {
+    public PullRequestDto reopen(String owner, String repoName, int number, String actor, boolean hasWriteAccess) {
         PullRequest pr = requirePullRequest(owner, repoName, number);
         if (pr.getStatus() != PullRequestStatus.CLOSED) {
             throw new InvalidStateException(
                     "Only a closed pull request can be reopened (this one is " + pr.getStatus() + ")");
         }
-        requireAuthorOrOwner(pr, owner, actor, "reopen");
+        requireAuthorOrWriter(pr, actor, hasWriteAccess, "reopen");
 
         // US-004: reopening requires the source branch to still exist.
         try (Repository repo = openRepository(owner, repoName)) {
@@ -517,12 +495,12 @@ public class PullRequestServiceImpl implements PullRequestService {
         }
     }
 
-    /** Closing/reopening is limited to the PR author and the repository owner. */
-    private void requireAuthorOrOwner(PullRequest pr, String repoOwner, String actor, String action) {
+    /** Closing/reopening is limited to the PR author and users with write access. */
+    private void requireAuthorOrWriter(PullRequest pr, String actor, boolean hasWriteAccess, String action) {
         boolean isAuthor = pr.getAuthor() != null && actor.equals(pr.getAuthor().getName());
-        if (!isAuthor && !actor.equals(repoOwner)) {
+        if (!isAuthor && !hasWriteAccess) {
             throw new AccessDeniedDomainException(
-                    "Only the pull request author or the repository owner can " + action + " it");
+                    "Only the pull request author or a user with write access can " + action + " it");
         }
     }
 
@@ -557,11 +535,19 @@ public class PullRequestServiceImpl implements PullRequestService {
     private PullRequestDto toDto(PullRequest pr, String owner, String repoName) {
         int commitsCount = 0;
         int changedFiles = 0;
+        String currentHeadSha = null;
+        List<Integer> closingIssues = List.of();
         if (pr.getStatus() == PullRequestStatus.OPEN) {
             Optional<CompareDto> comparison = safeCompare(owner, repoName, pr);
             if (comparison.isPresent()) {
                 commitsCount = comparison.get().commits().size();
                 changedFiles = comparison.get().files().size();
+            }
+            LiveRefs refs = liveRefs(owner, repoName, pr.getSourceBranch());
+            currentHeadSha = refs.sourceTip();
+            // Only a merge into the default branch closes issues, so only then is it worth saying.
+            if (pr.getTargetBranch().equals(refs.defaultBranch())) {
+                closingIssues = closingIssueResolver.closingIssues(pr.getRepository(), pr.getTitle(), pr.getDescription());
             }
         }
 
@@ -575,9 +561,12 @@ public class PullRequestServiceImpl implements PullRequestService {
                 pr.getTargetBranch(),
                 pr.getHeadSha(),
                 pr.getBaseSha(),
+                currentHeadSha,
+                closingIssues,
                 toUserSummary(pr.getAuthor()),
                 toUserSummary(pr.getMergedBy()),
                 pr.getMergeCommitSha(),
+                mergeMethodOf(pr),
                 commitsCount,
                 changedFiles,
                 commentRepository.countByPullRequest(pr),
@@ -585,6 +574,29 @@ public class PullRequestServiceImpl implements PullRequestService {
                 toEpochMillis(pr.getUpdatedAt()),
                 toEpochMillis(pr.getMergedAt()),
                 toEpochMillis(pr.getClosedAt()));
+    }
+
+    /** Live source tip and default branch; either may be null. */
+    private record LiveRefs(String sourceTip, String defaultBranch) {
+    }
+
+    /** Read in one repository open; a detail read must never fail over these. */
+    private LiveRefs liveRefs(String owner, String repoName, String sourceBranch) {
+        try (Repository repo = openRepository(owner, repoName)) {
+            ObjectId tip = repo.resolve(Constants.R_HEADS + sourceBranch);
+            return new LiveRefs(tip == null ? null : tip.getName(), defaultBranchOf(repo));
+        } catch (IOException | RuntimeException e) {
+            log.debug("Could not read refs of {}/{}: {}", owner, repoName, e.getMessage());
+            return new LiveRefs(null, null);
+        }
+    }
+
+    /** Rows merged before merge methods existed were all merge commits. */
+    private static String mergeMethodOf(PullRequest pr) {
+        if (pr.getStatus() != PullRequestStatus.MERGED) {
+            return null;
+        }
+        return (pr.getMergeMethod() != null ? pr.getMergeMethod() : MergeMethod.MERGE).wireName();
     }
 
     private Optional<CompareDto> safeCompare(String owner, String repoName, PullRequest pr) {

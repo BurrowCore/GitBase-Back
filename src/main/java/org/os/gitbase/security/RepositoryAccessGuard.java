@@ -4,20 +4,30 @@ import org.os.gitbase.exception.AccessDeniedDomainException;
 import org.os.gitbase.exception.ResourceNotFoundException;
 import org.os.gitbase.git.entity.Collaborator;
 import org.os.gitbase.git.entity.RepositoryGit;
+import org.os.gitbase.git.entity.Team;
 import org.os.gitbase.git.entity.enums.RepositoryPermission;
 import org.os.gitbase.git.repository.CollaboratorRepository;
 import org.os.gitbase.git.repository.GitRepositoryDB;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.git.repository.TeamGrant;
+import org.os.gitbase.git.repository.TeamMemberRepository;
+import org.os.gitbase.git.repository.TeamRepoRepository;
+import org.os.gitbase.git.repository.TeamRepository;
 import org.springframework.stereotype.Component;
 
 import java.security.Principal;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 /**
  * Central authorization gate for repository access.
  *
- * <p><b>Effective permission</b> is resolved in Gitea's order — the first match wins:
+ * <p><b>Organizations</b> (DECISION-014): for a repository owned by an organization, members of
+ * its Owners team count as owners; other members get the strongest permission of their teams that
+ * cover the repository, combined with any direct collaborator grant by taking the stronger.
+ *
+ * <p><b>Effective permission</b> is resolved in this order — the first match wins:
  * <ol>
  *   <li><b>Owner</b> → outranks everything; the only role that may delete the repository or
  *       manage its collaborators.</li>
@@ -39,10 +49,20 @@ public class RepositoryAccessGuard {
 
     private final GitRepositoryDB repositoryDB;
     private final CollaboratorRepository collaboratorRepository;
+    private final CurrentUserResolver currentUserResolver;
+    private final TeamRepository teamRepository;
+    private final TeamMemberRepository teamMemberRepository;
+    private final TeamRepoRepository teamRepoRepository;
 
-    public RepositoryAccessGuard(GitRepositoryDB repositoryDB, CollaboratorRepository collaboratorRepository) {
+    public RepositoryAccessGuard(GitRepositoryDB repositoryDB, CollaboratorRepository collaboratorRepository,
+                                 CurrentUserResolver currentUserResolver, TeamRepository teamRepository,
+                                 TeamMemberRepository teamMemberRepository, TeamRepoRepository teamRepoRepository) {
         this.repositoryDB = repositoryDB;
         this.collaboratorRepository = collaboratorRepository;
+        this.currentUserResolver = currentUserResolver;
+        this.teamRepository = teamRepository;
+        this.teamMemberRepository = teamMemberRepository;
+        this.teamRepoRepository = teamRepoRepository;
     }
 
     // ─────────────────────────── read ───────────────────────────
@@ -103,10 +123,17 @@ public class RepositoryAccessGuard {
 
     // ─────────────────────────── queries ───────────────────────────
 
-    /** True when the authenticated caller owns the given namespace. */
+    /**
+     * True when the caller owns the namespace: it is their own account, or it is an organization
+     * and they are in its Owners team. Personal namespaces have no teams, so the second check is
+     * simply false for them.
+     */
     public boolean isOwner(String ownerUsername, Principal principal) {
         String caller = callerName(principal);
-        return caller != null && ownerUsername != null && caller.equals(ownerUsername);
+        if (caller == null || ownerUsername == null) {
+            return false;
+        }
+        return caller.equals(ownerUsername) || teamMemberRepository.isOwner(ownerUsername, caller);
     }
 
     /**
@@ -121,23 +148,33 @@ public class RepositoryAccessGuard {
 
     private Optional<RepositoryPermission> effectivePermission(RepositoryGit repo, String ownerUsername,
                                                                Principal principal) {
-        // 1. Owner outranks every grant.
-        if (isOwner(ownerUsername, principal)) {
+        String caller = callerName(principal);
+        if (caller == null) {
+            return Optional.empty();
+        }
+        // 1. The account owner outranks every grant.
+        if (caller.equals(ownerUsername)) {
             return Optional.of(RepositoryPermission.ADMIN);
         }
-        // 2. An explicit collaborator grant.
-        String caller = callerName(principal);
-        if (caller != null) {
-            Optional<Collaborator> grant = collaboratorRepository.findByRepositoryAndUsername(repo, caller);
-            if (grant.isPresent()) {
-                return Optional.of(grant.get().getPermission());
+        // 2. Organization teams: the Owners team is owner-level; otherwise the
+        //    strongest team that covers this repository. Empty for personal namespaces.
+        RepositoryPermission best = null;
+        for (TeamGrant grant : teamRepository.findGrants(ownerUsername, caller, repo.getId())) {
+            if (grant.ownerTeam()) {
+                return Optional.of(RepositoryPermission.ADMIN);
             }
+            best = stronger(best, grant.permission());
         }
-        // 3. Public repositories are readable by any authenticated user.
-        if (!repo.isPrivate() && caller != null) {
-            return Optional.of(RepositoryPermission.READ);
+        // 3. A direct collaborator grant — combined with team access by taking the stronger.
+        Optional<Collaborator> collaborator = collaboratorRepository.findByRepositoryAndUsername(repo, caller);
+        if (collaborator.isPresent()) {
+            best = stronger(best, collaborator.get().getPermission());
         }
-        return Optional.empty();
+        if (best != null) {
+            return Optional.of(best);
+        }
+        // 4. Public repositories are readable by any authenticated user.
+        return repo.isPrivate() ? Optional.empty() : Optional.of(RepositoryPermission.READ);
     }
 
     private boolean canRead(RepositoryGit repo, String ownerUsername, Principal principal) {
@@ -151,16 +188,52 @@ public class RepositoryAccessGuard {
                 .isPresent();
     }
 
+    private static RepositoryPermission stronger(RepositoryPermission current, RepositoryPermission candidate) {
+        return current == null || candidate.atLeast(current) ? candidate : current;
+    }
+
     /**
-     * Repository names in {@code ownerUsername}'s namespace that the caller collaborates on.
-     * Lets a listing include private repos the caller may see without a per-row permission check.
+     * Which private repositories in {@code ownerUsername}'s namespace the caller may see, for
+     * listings: {@link PrivateRepoVisibility#all()} for its owners and members of a team that
+     * covers every repository, otherwise the named ones (collaborator grants plus team grants).
+     * A fixed number of queries, never a check per repository.
      */
-    public Set<String> collaboratingRepoNames(String ownerUsername, Principal principal) {
+    public PrivateRepoVisibility privateRepoVisibility(String ownerUsername, Principal principal) {
         String caller = callerName(principal);
         if (caller == null) {
-            return Set.of();
+            return PrivateRepoVisibility.none();
         }
-        return Set.copyOf(collaboratorRepository.findCollaboratingRepoNames(ownerUsername, caller));
+        if (isOwner(ownerUsername, principal)) {
+            return PrivateRepoVisibility.all();
+        }
+        List<Team> teams = teamRepository.findTeamsOfMember(ownerUsername, caller);
+        if (teams.stream().anyMatch(team -> team.isOwnerTeam() || team.isIncludesAllRepositories())) {
+            return PrivateRepoVisibility.all();
+        }
+        Set<String> names = new HashSet<>(collaboratorRepository.findCollaboratingRepoNames(ownerUsername, caller));
+        if (!teams.isEmpty()) {
+            names.addAll(teamRepoRepository.findRepoNamesOfTeams(teams));
+        }
+        return PrivateRepoVisibility.only(names);
+    }
+
+    /** Result of {@link #privateRepoVisibility}. */
+    public record PrivateRepoVisibility(boolean allVisible, Set<String> names) {
+        static PrivateRepoVisibility all() {
+            return new PrivateRepoVisibility(true, Set.of());
+        }
+
+        static PrivateRepoVisibility none() {
+            return new PrivateRepoVisibility(false, Set.of());
+        }
+
+        static PrivateRepoVisibility only(Set<String> names) {
+            return new PrivateRepoVisibility(false, Set.copyOf(names));
+        }
+
+        public boolean canSee(String repoName) {
+            return allVisible || names.contains(repoName);
+        }
     }
 
     // ─────────────────────────── helpers ───────────────────────────
@@ -170,9 +243,12 @@ public class RepositoryAccessGuard {
                 .orElseThrow(() -> notFound(ownerUsername, repoName));
     }
 
-    /** Caller's username, normalised the same way the rest of the app does (email → local part). */
+    /**
+     * Caller's username — the stored name of the account the principal authenticated as. Never
+     * the email's local part: that let {@code alice@evil.com} act as user {@code alice}.
+     */
     private String callerName(Principal principal) {
-        return principal == null ? null : Helper.removeAtSymbolAndFollowing(principal.getName());
+        return currentUserResolver.usernameOrNull(principal);
     }
 
     private ResourceNotFoundException notFound(String ownerUsername, String repoName) {

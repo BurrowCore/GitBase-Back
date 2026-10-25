@@ -6,6 +6,7 @@ import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 import org.os.gitbase.auth.entity.User;
+import org.os.gitbase.git.entity.enums.MergeMethod;
 import org.os.gitbase.git.entity.enums.PullRequestStatus;
 
 import java.time.LocalDateTime;
@@ -99,6 +100,25 @@ public class PullRequest {
     /** SHA of the merge commit created on the target branch. Null until merged. */
     @Column(name = "merge_commit_sha", length = 40)
     private String mergeCommitSha;
+
+    /**
+     * How the pull request was landed. Null until merged, and for rows merged before merge methods
+     * existed (all of which were merge commits). Kept alongside the merge commit id
+     * so the UI can say "squashed" or "rebased" without inspecting git history.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "merge_method", length = 16)
+    private MergeMethod mergeMethod;
+
+    /**
+     * Optimistic lock. The merge runs its git work outside any transaction, so two concurrent
+     * merge requests can both pass the OPEN check; only the first to commit wins, the other gets
+     * a 409 instead of overwriting {@code mergedBy}/{@code mergeCommitSha}. Existing rows start
+     * at 0 via the column default.
+     */
+    @Version
+    @Column(name = "version", columnDefinition = "bigint default 0")
+    private Long version;
 
     @PrePersist
     void onCreate() {

@@ -17,4 +17,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     Optional<Long> countUsersWithClientRole();
 
     Optional<User> findUserByName(String name);
+
+    /** Username taken, ignoring case — usernames are namespaces, so Alice and alice must not coexist. */
+    boolean existsByNameIgnoreCase(String name);
+
+    /** More than 1 means legacy duplicate accounts share this username — see CurrentUserResolver. */
+    long countByNameIgnoreCase(String name);
 }

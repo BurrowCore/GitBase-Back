@@ -5,6 +5,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.transport.PostReceiveHook;
 import org.eclipse.jgit.transport.ReceiveCommand;
 import org.eclipse.jgit.transport.ReceivePack;
+import org.os.gitbase.git.config.RepositoryCoordinates;
 import org.os.gitbase.git.entity.enums.ActivityType;
 import org.os.gitbase.git.service.ActivityService;
 import org.springframework.stereotype.Component;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 import java.io.File;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Records an activity-feed entry for each successful push.
@@ -41,18 +43,13 @@ public class PushActivityHook implements PostReceiveHook {
             if (commands == null || commands.isEmpty()) {
                 return;
             }
-            File gitDir = repositoryDirectory(rp);
-            if (gitDir == null) {
+            Optional<RepositoryCoordinates> coordinates = RepositoryCoordinates.fromGitDir(repositoryDirectory(rp));
+            if (coordinates.isEmpty()) {
+                log.warn("Push activity: could not resolve owner/repository from the git directory");
                 return;
             }
-
-            String repoName = stripGitSuffix(gitDir.getName());
-            File parent = gitDir.getParentFile();
-            String username = parent != null ? parent.getName() : null;
-            if (username == null || username.isBlank()) {
-                log.warn("Push activity: could not resolve owner from {}", gitDir.getAbsolutePath());
-                return;
-            }
+            String username = coordinates.get().owner();
+            String repoName = coordinates.get().repoName();
 
             List<String> branches = commands.stream()
                     .filter(c -> c.getResult() == ReceiveCommand.Result.OK)
@@ -73,9 +70,5 @@ public class PushActivityHook implements PostReceiveHook {
     private File repositoryDirectory(ReceivePack rp) {
         Repository repository = rp.getRepository();
         return repository == null ? null : repository.getDirectory();
-    }
-
-    private String stripGitSuffix(String name) {
-        return name.endsWith(".git") ? name.substring(0, name.length() - 4) : name;
     }
 }

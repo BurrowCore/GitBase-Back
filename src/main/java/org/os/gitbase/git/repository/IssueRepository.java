@@ -3,60 +3,44 @@ package org.os.gitbase.git.repository;
 import org.os.gitbase.git.entity.Issue;
 import org.os.gitbase.git.entity.RepositoryGit;
 import org.os.gitbase.git.entity.enums.IssueState;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
+/**
+ * Filtering is done with {@link IssueSpecifications} through {@link JpaSpecificationExecutor}
+ * rather than a single JPQL query with {@code (:param IS NULL OR …)} guards — see that class for
+ * why (a null bound into {@code lower(…)} breaks on PostgreSQL, and the guards defeat the index).
+ */
 @org.springframework.stereotype.Repository
-public interface IssueRepository extends JpaRepository<Issue, Long> {
+public interface IssueRepository extends JpaRepository<Issue, Long>, JpaSpecificationExecutor<Issue> {
 
     Optional<Issue> findByRepositoryAndNumber(RepositoryGit repository, int number);
 
     long countByRepositoryAndState(RepositoryGit repository, IssueState state);
 
+    /** Which of {@code numbers} are issues in this repository (the rest may be pull requests). */
+    @Query("SELECT i.number FROM Issue i WHERE i.repository = :repository AND i.number IN :numbers ORDER BY i.number")
+    List<Integer> findExistingNumbers(@Param("repository") RepositoryGit repository,
+                                      @Param("numbers") Collection<Integer> numbers);
+
+    /** Open issues among {@code numbers} — the ones a merged pull request may close. */
+    List<Issue> findByRepositoryAndStateAndNumberIn(RepositoryGit repository, IssueState state,
+                                                    Collection<Integer> numbers);
+
+    /** Row lock for serialising dependency changes; the returned id is irrelevant. Needs a transaction. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT i.id FROM Issue i WHERE i.id = :id")
+    Optional<Long> lockForUpdate(@Param("id") Long id);
+
     /** Highest issue number in this repository; feeds the shared allocator. */
     @Query("SELECT MAX(i.number) FROM Issue i WHERE i.repository = :repository")
     Integer findMaxNumber(@Param("repository") RepositoryGit repository);
-
-    /**
-     * Filtered, paginated listing. Every filter is optional — a null means "don't filter on this".
-     * Doing it in one query keeps listing off the N+1 path (ADR-004); the label and assignee
-     * filters use EXISTS rather than a join so a match can't duplicate rows.
-     */
-    @Query(value = """
-            SELECT i FROM Issue i
-            WHERE i.repository = :repository
-              AND (:state IS NULL OR i.state = :state)
-              AND (:label IS NULL OR EXISTS (
-                    SELECT 1 FROM Issue i2 JOIN i2.labels l
-                    WHERE i2 = i AND l.name = :label))
-              AND (:assignee IS NULL OR EXISTS (
-                    SELECT 1 FROM Issue i3 JOIN i3.assignees a
-                    WHERE i3 = i AND a.name = :assignee))
-              AND (:search IS NULL OR LOWER(i.title) LIKE LOWER(CONCAT('%', :search, '%'))
-                                   OR LOWER(i.body)  LIKE LOWER(CONCAT('%', :search, '%')))
-            """,
-            countQuery = """
-            SELECT COUNT(i) FROM Issue i
-            WHERE i.repository = :repository
-              AND (:state IS NULL OR i.state = :state)
-              AND (:label IS NULL OR EXISTS (
-                    SELECT 1 FROM Issue i2 JOIN i2.labels l
-                    WHERE i2 = i AND l.name = :label))
-              AND (:assignee IS NULL OR EXISTS (
-                    SELECT 1 FROM Issue i3 JOIN i3.assignees a
-                    WHERE i3 = i AND a.name = :assignee))
-              AND (:search IS NULL OR LOWER(i.title) LIKE LOWER(CONCAT('%', :search, '%'))
-                                   OR LOWER(i.body)  LIKE LOWER(CONCAT('%', :search, '%')))
-            """)
-    Page<Issue> search(@Param("repository") RepositoryGit repository,
-                       @Param("state") IssueState state,
-                       @Param("label") String label,
-                       @Param("assignee") String assignee,
-                       @Param("search") String search,
-                       Pageable pageable);
 }

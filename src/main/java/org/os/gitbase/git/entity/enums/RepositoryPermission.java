@@ -1,14 +1,14 @@
 package org.os.gitbase.git.entity.enums;
 
 /**
- * Access ladder for a repository collaborator, mirroring Gitea's {@code AccessMode}.
+ * Access ladder for a repository collaborator or team.
  *
  * <p>The repository <b>owner</b> is deliberately not a value here: ownership comes from the
  * {@code repositories.user_id} column, always outranks every collaborator level, and is the only
  * role permitted to delete the repository or manage its collaborators.
  *
- * <p>Gitea's Read/Write/Admin is a deliberate simplification of GitHub's five-rung ladder — it
- * drops Triage and Maintain, which exist mainly for large orgs.
+ * <p>Three levels are deliberate: they cover the real boundaries (see a private repo / push and
+ * merge / change settings) without the extra triage/maintain rungs larger platforms use.
  */
 public enum RepositoryPermission {
 

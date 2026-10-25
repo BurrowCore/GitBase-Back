@@ -5,7 +5,8 @@ import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.git.dto.*;
 import org.os.gitbase.git.entity.enums.RepositoryPermission;
 import org.os.gitbase.git.service.IssueService;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.git.service.IssueTemplateService;
+import org.os.gitbase.security.CurrentUserResolver;
 import org.os.gitbase.security.RepositoryAccessGuard;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,7 +21,7 @@ import static org.os.gitbase.constant.Constant.GITBASE_MAPPING_REQUEST;
  * Issue tracker endpoints.
  *
  * <p><b>Numbering:</b> issues share one {@code #number} sequence with pull requests, so a
- * repository reads #1, #2, #3 whatever the type — the behaviour GitHub and Gitea both have.
+ * repository reads #1, #2, #3 whatever the type.
  *
  * <p><b>Authorization:</b> reading follows repository visibility. Any user who can read may open
  * an issue and comment (as on GitHub). Editing, closing and reopening require being the issue
@@ -34,9 +35,15 @@ public class IssueController {
     private final IssueService issueService;
     private final RepositoryAccessGuard accessGuard;
 
-    public IssueController(IssueService issueService, RepositoryAccessGuard accessGuard) {
+    private final CurrentUserResolver currentUser;
+    private final IssueTemplateService templateService;
+
+    public IssueController(IssueService issueService, RepositoryAccessGuard accessGuard,
+                           CurrentUserResolver currentUser, IssueTemplateService templateService) {
         this.issueService = issueService;
         this.accessGuard = accessGuard;
+        this.currentUser = currentUser;
+        this.templateService = templateService;
     }
 
     // -------------------- LIST --------------------
@@ -103,6 +110,18 @@ public class IssueController {
         accessGuard.requireWriteAccess(username, repoName, principal);
         issueService.deleteLabel(username, repoName, name);
         return ResponseEntity.ok(ApiResponseEntity.message("Label deleted", HttpStatus.OK));
+    }
+
+    // -------------------- TEMPLATES --------------------
+    /** Templates and chooser configuration, read live from {@code .gitbase/} on the default branch. */
+    @GetMapping("/templates")
+    public ResponseEntity<ApiResponseEntity<IssueTemplatesDto>> templates(
+            @PathVariable String username,
+            @PathVariable String repoName,
+            Principal principal) {
+        accessGuard.requireReadAccess(username, repoName, principal);
+        return ResponseEntity.ok(ApiResponseEntity.ok(
+                templateService.templates(username, repoName), "Issue templates retrieved"));
     }
 
     // -------------------- DETAIL --------------------
@@ -185,9 +204,9 @@ public class IssueController {
 
     // -------------------- helpers --------------------
 
-    /** The acting username, normalised the same way the rest of the app does (email → local part). */
+    /** The acting user's stored username (never derived from the email). */
     private String actor(Principal principal) {
-        return Helper.removeAtSymbolAndFollowing(principal.getName());
+        return currentUser.requireUsername(principal);
     }
 
     /** Resolved once per request and handed to the service, which cannot see the Principal. */

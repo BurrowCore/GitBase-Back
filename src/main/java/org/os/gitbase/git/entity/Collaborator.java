@@ -12,9 +12,8 @@ import java.util.UUID;
 /**
  * Grants a user a permission level on someone else's repository.
  *
- * <p>Follows Gitea's {@code repo_collaborator} shape: a direct user→repository grant with one
- * permission level, unique per pair. Access is effective immediately — Gitea has no
- * invitation/acceptance step (unlike GitHub), and neither do we.
+ * <p>A direct user→repository grant with one permission level, unique per pair. Access is
+ * effective immediately — GitBase has no invitation/acceptance step.
  *
  * <p>The repository owner is never stored here; ownership lives on {@code RepositoryGit.owner}
  * and always outranks any collaborator grant.

@@ -17,8 +17,12 @@ import org.os.gitbase.git.dto.CreatePullRequestDto;
 import org.os.gitbase.git.dto.MergePullRequestDto;
 import org.os.gitbase.git.entity.PullRequest;
 import org.os.gitbase.git.entity.RepositoryGit;
+import org.os.gitbase.git.entity.enums.MergeMethod;
 import org.os.gitbase.git.entity.enums.PullRequestStatus;
 import org.os.gitbase.git.repository.GitRepositoryDB;
+import org.os.gitbase.git.repository.IssueRepository;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.transaction.support.TransactionOperations;
 import org.os.gitbase.git.repository.PullRequestCommentRepository;
 import org.os.gitbase.git.repository.PullRequestRepository;
 import org.mockito.stubbing.Answer;
@@ -60,6 +64,8 @@ class PullRequestServiceImplTest {
     private GitService gitService;
     private ActivityService activityService;
     private IssueNumberAllocator numberAllocator;
+    private IssueRepository issueRepository;
+    private ApplicationEventPublisher events;
 
     private PullRequestServiceImpl service;
     private RepositoryGit repoEntity;
@@ -75,8 +81,13 @@ class PullRequestServiceImplTest {
         activityService = mock(ActivityService.class);
         numberAllocator = mock(IssueNumberAllocator.class);
 
+        issueRepository = mock(IssueRepository.class);
+        events = mock(ApplicationEventPublisher.class);
+        ClosingKeywordParser parser = new ClosingKeywordParser();
         service = new PullRequestServiceImpl(pullRequestRepository, commentRepository, repositoryDB,
-                userRepository, gitService, activityService, numberAllocator, tempDir.toString());
+                userRepository, gitService, activityService, numberAllocator, new PullRequestMergeEngine(),
+                parser, new ClosingIssueResolver(parser, issueRepository), events,
+                TransactionOperations.withoutTransaction(), tempDir.toString());
 
         alice = new User();
         alice.setId(UUID.randomUUID());
@@ -132,33 +143,40 @@ class PullRequestServiceImplTest {
         pr.setStatus(PullRequestStatus.MERGED);
         givenPullRequest(pr);
 
-        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null)))
+        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null)))
                 .isInstanceOf(InvalidStateException.class);
     }
 
     @Test
-    void merge_rejectsUnsupportedStrategy() {
+    void merge_rejectsUnknownMethod() {
         givenPullRequest(openPullRequest(1));
-        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("squash", null)))
+        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("octopus", null, null)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("squash");
+                .hasMessageContaining("octopus");
     }
 
     @Test
-    void close_rejectsUserWhoIsNeitherAuthorNorOwner() {
+    void close_rejectsUserWhoIsNeitherAuthorNorWriter() {
         givenPullRequest(openPullRequest(1));
-        User bob = new User();
-        bob.setName("bob");
-        when(userRepository.findUserByName("bob")).thenReturn(Optional.of(bob));
 
-        assertThatThrownBy(() -> service.close(OWNER, REPO, 1, "bob"))
+        assertThatThrownBy(() -> service.close(OWNER, REPO, 1, "bob", false))
                 .isInstanceOf(AccessDeniedDomainException.class);
+    }
+
+    @Test
+    void close_allowsAWriteCollaboratorWhoIsNotTheAuthor() {
+        givenPullRequest(openPullRequest(1));
+
+        service.close(OWNER, REPO, 1, "carol", true);
+
+        assertThat(pullRequestRepository.findByRepositoryAndNumber(repoEntity, 1).orElseThrow().getStatus())
+                .isEqualTo(PullRequestStatus.CLOSED);
     }
 
     @Test
     void reopen_rejectsPullRequestThatIsNotClosed() {
         givenPullRequest(openPullRequest(1));
-        assertThatThrownBy(() -> service.reopen(OWNER, REPO, 1, OWNER))
+        assertThatThrownBy(() -> service.reopen(OWNER, REPO, 1, OWNER, true))
                 .isInstanceOf(InvalidStateException.class)
                 .hasMessageContaining("closed");
     }
@@ -180,7 +198,7 @@ class PullRequestServiceImplTest {
 
         String mainBefore = resolve("main");
 
-        var result = service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null));
+        var result = service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null));
 
         assertThat(result.merged()).isTrue();
         assertThat(result.sha()).isNotBlank();
@@ -190,6 +208,77 @@ class PullRequestServiceImplTest {
         assertThat(mainAfter).isEqualTo(result.sha()).isNotEqualTo(mainBefore);
         assertThat(pr.getStatus()).isEqualTo(PullRequestStatus.MERGED);
         assertThat(pr.getMergeCommitSha()).isEqualTo(result.sha());
+        assertThat(pr.getMergeMethod()).isEqualTo(MergeMethod.MERGE);
+    }
+
+    @Test
+    void merge_publishesClosingReferencesForTheIssueListener() throws Exception {
+        buildRepository(true);
+        PullRequest pr = openPullRequest(1);
+        pr.setDescription("Fixes #3, resolves #8 and mentions #9");
+        givenPullRequest(pr);
+
+        service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null));
+
+        var event = org.mockito.ArgumentCaptor.forClass(PullRequestMergedEvent.class);
+        org.mockito.Mockito.verify(events).publishEvent(event.capture());
+        assertThat(event.getValue().closingIssueNumbers()).containsExactly(3, 8);
+        assertThat(event.getValue().intoDefaultBranch()).isTrue(); // main is HEAD in the fixture
+    }
+
+    @Test
+    void merge_refusesWhenTheSourceMovedSinceReview() throws Exception {
+        buildRepository(true);
+        PullRequest pr = openPullRequest(1);
+        givenPullRequest(pr);
+        String stale = "0".repeat(40);
+
+        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, stale)))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("Head branch was modified");
+        assertThat(pr.getStatus()).isEqualTo(PullRequestStatus.OPEN);
+    }
+
+    @Test
+    void merge_concurrentSecondMergeIsAConflict_notASecondAuditRecord() throws Exception {
+        buildRepository(true);
+        PullRequest pr = openPullRequest(1);
+        pr.setVersion(0L);
+        givenPullRequest(pr);
+        // Another request merges between our read and our write: the row's version moves on.
+        when(pullRequestRepository.findById(1L)).thenAnswer(inv -> {
+            PullRequest concurrent = openPullRequest(1);
+            concurrent.setStatus(PullRequestStatus.MERGED);
+            concurrent.setVersion(1L);
+            return Optional.of(concurrent);
+        });
+
+        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null)))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("merged or changed concurrently");
+    }
+
+    @Test
+    void merge_recordsSquashMethodAndUsesThePullRequestAuthorAsCommitAuthor() throws Exception {
+        buildRepository(true);
+        PullRequest pr = openPullRequest(1);
+        givenPullRequest(pr);
+        User carol = new User();
+        carol.setName("carol");
+        carol.setEmail("carol@example.com");
+        when(userRepository.findUserByName("carol")).thenReturn(Optional.of(carol));
+
+        var result = service.merge(OWNER, REPO, 1, "carol", new MergePullRequestDto("squash", null, null));
+
+        assertThat(result.mergeMethod()).isEqualTo("squash");
+        assertThat(pr.getMergeMethod()).isEqualTo(MergeMethod.SQUASH);
+        try (Repository repo = new FileRepositoryBuilder().setGitDir(bareRepoPath().toFile()).setBare().build();
+             var walk = new org.eclipse.jgit.revwalk.RevWalk(repo)) {
+            var squash = walk.parseCommit(repo.resolve(result.sha()));
+            assertThat(squash.getParentCount()).isEqualTo(1);
+            assertThat(squash.getAuthorIdent().getEmailAddress()).isEqualTo("alice@example.com");
+            assertThat(squash.getCommitterIdent().getEmailAddress()).isEqualTo("carol@example.com");
+        }
     }
 
     @Test
@@ -200,7 +289,7 @@ class PullRequestServiceImplTest {
 
         String mainBefore = resolve("main");
 
-        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null)))
+        assertThatThrownBy(() -> service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null)))
                 .isInstanceOf(ConflictException.class)
                 .satisfies(thrown -> assertThat(((ConflictException) thrown).getConflicts())
                         .contains("shared.txt"));
@@ -220,7 +309,7 @@ class PullRequestServiceImplTest {
         givenPullRequest(pr);
 
         String before = resolve("main");
-        var result = service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null));
+        var result = service.merge(OWNER, REPO, 1, OWNER, new MergePullRequestDto("merge", null, null));
 
         assertThat(result.merged()).isTrue();
         assertThat(result.sha()).isEqualTo(before);
@@ -234,7 +323,7 @@ class PullRequestServiceImplTest {
         pr.setStatus(PullRequestStatus.CLOSED);
         givenPullRequest(pr);
 
-        assertThatCode(() -> service.reopen(OWNER, REPO, 1, OWNER)).doesNotThrowAnyException();
+        assertThatCode(() -> service.reopen(OWNER, REPO, 1, OWNER, true)).doesNotThrowAnyException();
         assertThat(pr.getStatus()).isEqualTo(PullRequestStatus.OPEN);
     }
 
@@ -245,7 +334,7 @@ class PullRequestServiceImplTest {
         pr.setStatus(PullRequestStatus.CLOSED);
         givenPullRequest(pr);
 
-        assertThatThrownBy(() -> service.reopen(OWNER, REPO, 1, OWNER))
+        assertThatThrownBy(() -> service.reopen(OWNER, REPO, 1, OWNER, true))
                 .isInstanceOf(InvalidStateException.class)
                 .hasMessageContaining("no longer exists");
     }
@@ -254,6 +343,7 @@ class PullRequestServiceImplTest {
 
     private PullRequest openPullRequest(int number) {
         PullRequest pr = new PullRequest();
+        pr.setId((long) number);
         pr.setNumber(number);
         pr.setTitle("Add things");
         pr.setRepository(repoEntity);
@@ -267,6 +357,7 @@ class PullRequestServiceImplTest {
     private void givenPullRequest(PullRequest pr) {
         when(pullRequestRepository.findByRepositoryAndNumber(repoEntity, pr.getNumber()))
                 .thenReturn(Optional.of(pr));
+        when(pullRequestRepository.findById(pr.getId())).thenReturn(Optional.of(pr));
         when(pullRequestRepository.save(any(PullRequest.class)))
                 .thenAnswer((Answer<PullRequest>) inv -> inv.getArgument(0));
     }

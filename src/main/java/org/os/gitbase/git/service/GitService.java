@@ -1,7 +1,5 @@
 package org.os.gitbase.git.service;
 
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.git.dto.BranchSummaryDto;
 import org.os.gitbase.git.dto.CommitDetailDto;
@@ -17,7 +15,8 @@ import org.os.gitbase.git.dto.RepositoryTreeDto;
 import java.util.List;
 
 public interface GitService {
-    void createRepository(String user, String repoName, boolean isPrivate);
+    /** Creates the bare repository with HEAD on {@code defaultBranch} (blank → "main"). */
+    void createRepository(String user, String repoName, boolean isPrivate, String defaultBranch);
     RepositoryInfo getRepositoryInfo(String username, String repoName);
     List<RepositoryTreeDto> listRepositories(String user);
     void deleteRepository(String user, String repoName);
@@ -57,10 +56,4 @@ public interface GitService {
 
     /** Three-way comparison of two refs (ahead/behind, added commits, merge-base diff). PR basis. */
     CompareDto compare(String username, String repoName, String base, String head);
-
-    void handleReceivePack(String username, String repoName, HttpServletRequest request, HttpServletResponse response);
-    void handleUploadPack(String username, String repoName,
-                                 HttpServletRequest request,
-                                 HttpServletResponse response);
-    void handleInfoRefs(String username, String repoName, String service, HttpServletResponse response);
 }

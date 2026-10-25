@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * Manages who may access a repository besides its owner.
  *
- * <p>Follows Gitea: a grant takes effect immediately, with no invitation/acceptance step.
+ * <p>A grant takes effect immediately, with no invitation/acceptance step.
  * Only the repository owner may call these — enforced by the controller via
  * {@code RepositoryAccessGuard.requireOwner}.
  */

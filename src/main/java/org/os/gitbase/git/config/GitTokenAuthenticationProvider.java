@@ -1,5 +1,6 @@
 package org.os.gitbase.git.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.os.gitbase.git.entity.GitToken;
 import org.os.gitbase.git.repository.GitTokenRepository;
 import org.os.gitbase.git.service.CommandGitService;
@@ -16,6 +17,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.List;
 
+@Slf4j
 @Component
 public class GitTokenAuthenticationProvider implements AuthenticationProvider {
 
@@ -30,32 +32,24 @@ public class GitTokenAuthenticationProvider implements AuthenticationProvider {
 
     @Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-        System.out.println("=== GitTokenAuthenticationProvider.authenticate() called ===");
         String username = authentication.getName();
         String token = authentication.getCredentials().toString();
-        System.out.println("Username: " + username);
-        System.out.println("Token: " + token.substring(0, Math.min(8, token.length())) + "...");
 
         // Inline validation to avoid circular dependency
         List<GitToken> tokens = gitTokenRepository.findByUsername(username);
-        System.out.println("Found " + tokens.size() + " tokens for user: " + username);
 
         boolean isValid = tokens.stream()
-                .anyMatch(t -> {
-                    boolean matches = passwordEncoder.matches(token, t.getTokenHash());
-                    boolean notExpired = (t.getExpiresAt() == null || t.getExpiresAt().isAfter(LocalDateTime.now()));
-                    System.out.println("Token matches: " + matches + ", Not expired: " + notExpired);
-                    return matches && notExpired;
-                });
+                .anyMatch(t -> passwordEncoder.matches(token, t.getTokenHash())
+                        && (t.getExpiresAt() == null || t.getExpiresAt().isAfter(LocalDateTime.now())));
 
         if (isValid) {
-            System.out.println("Authentication successful for user: " + username);
+            // Never log the token, nor any part of it.
+            log.debug("Git token authentication succeeded for {}", username);
             List<GrantedAuthority> authorities = List.of(new SimpleGrantedAuthority("ROLE_GIT_USER"));
             return new UsernamePasswordAuthenticationToken(username, token, authorities);
-        } else {
-            System.out.println("Authentication failed for user: " + username);
-            throw new BadCredentialsException("Invalid git token");
         }
+        log.debug("Git token authentication failed for {}", username);
+        throw new BadCredentialsException("Invalid git token");
     }
 
     @Override

@@ -7,7 +7,7 @@ import org.os.gitbase.git.dto.*;
  *
  * <p>All methods take the acting user's username; authorization (who may read the repository,
  * who may merge) is enforced by the controller through {@code RepositoryAccessGuard}, while the
- * rules that depend on pull-request state (author-only close, OPEN-only merge) live here.
+ * rules that depend on pull-request state (author-or-writer close, OPEN-only merge) live here.
  */
 public interface PullRequestService {
 
@@ -22,9 +22,13 @@ public interface PullRequestService {
 
     MergeResultDto merge(String owner, String repoName, int number, String actor, MergePullRequestDto request);
 
-    PullRequestDto close(String owner, String repoName, int number, String actor);
+    /**
+     * @param hasWriteAccess whether the actor holds WRITE on the repository (owner or collaborator);
+     *                       besides the pull-request author, only such users may close it
+     */
+    PullRequestDto close(String owner, String repoName, int number, String actor, boolean hasWriteAccess);
 
-    PullRequestDto reopen(String owner, String repoName, int number, String actor);
+    PullRequestDto reopen(String owner, String repoName, int number, String actor, boolean hasWriteAccess);
 
     CommentPageDto listComments(String owner, String repoName, int number, int page, int size);
 

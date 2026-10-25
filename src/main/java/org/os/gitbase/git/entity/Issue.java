@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
+import org.hibernate.annotations.BatchSize;
 import lombok.Setter;
 import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.git.entity.enums.IssueState;
@@ -16,13 +17,12 @@ import java.util.Set;
  * A tracked issue.
  *
  * <p><b>Numbering:</b> {@code number} comes from the repository-wide allocator shared with pull
- * requests, so issues and PRs interleave in one sequence exactly as they do on GitHub and Gitea.
+ * requests, so issues and PRs interleave in one sequence.
  * A repository therefore never has both an issue #1 and a pull request #1, which is what makes a
  * bare "#12" reference unambiguous.
  *
- * <p>Unlike Gitea we keep issues and pull requests in <b>separate tables</b> (Gitea stores a PR as
- * an issue row with {@code is_pull=true}); only the number sequence is shared. That was a
- * deliberate call to avoid rewriting the existing pull-request feature — see DECISION-008.
+ * <p>Issues and pull requests live in <b>separate tables</b>; only the number sequence is shared.
+ * That was a deliberate call to avoid rewriting the existing pull-request feature — see DECISION-008.
  */
 @Entity
 @Table(
@@ -68,6 +68,8 @@ public class Issue {
     @Column(nullable = false, length = 20)
     private IssueState state = IssueState.OPEN;
 
+    // Batched so listing N issues costs ceil(N/50) selects for labels, not N.
+    @BatchSize(size = 50)
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(
             name = "issue_labels",
@@ -76,7 +78,8 @@ public class Issue {
     )
     private Set<Label> labels = new LinkedHashSet<>();
 
-    /** Gitea supports multiple assignees; so do we. */
+    /** An issue may have several assignees. */
+    @BatchSize(size = 50)
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(
             name = "issue_assignees",
@@ -97,6 +100,14 @@ public class Issue {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "closed_by_id")
     private User closedBy;
+
+    /**
+     * Number of the pull request whose merge closed this issue through a closing keyword
+     * ("Fixes #12"); null when closed by hand. Cleared on reopen. Stored as the number, not a
+     * foreign key — the pair (repository, number) is already unique.
+     */
+    @Column(name = "closed_by_pull_number")
+    private Integer closedByPullNumber;
 
     @PrePersist
     void onCreate() {

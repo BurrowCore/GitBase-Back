@@ -7,7 +7,7 @@ import org.os.gitbase.git.dto.GitTokenInfo;
 import org.os.gitbase.git.entity.enums.ActivityType;
 import org.os.gitbase.git.service.ActivityService;
 import org.os.gitbase.git.service.CommandGitService;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.security.CurrentUserResolver;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,9 +25,13 @@ public class GitTokenController {
     private final CommandGitService tokenService;
     private final ActivityService activityService;
 
-    public GitTokenController(CommandGitService tokenService, ActivityService activityService) {
+    private final CurrentUserResolver currentUser;
+
+    public GitTokenController(CommandGitService tokenService, ActivityService activityService,
+                              CurrentUserResolver currentUser) {
         this.tokenService = tokenService;
         this.activityService = activityService;
+        this.currentUser = currentUser;
     }
 
     @PostMapping
@@ -35,7 +39,7 @@ public class GitTokenController {
             Principal principal,
             @RequestBody CreateTokenDto createTokenDto) {
 
-        String username = Helper.removeAtSymbolAndFollowing(principal.getName());
+        String username = currentUser.requireUsername(principal);
 
         String rawToken = tokenService.createToken(
                 username,
@@ -57,7 +61,7 @@ public class GitTokenController {
 
     @GetMapping
     public ResponseEntity<ApiResponseEntity<List<GitTokenInfo>>> getTokens(Principal principal) {
-        String username = Helper.removeAtSymbolAndFollowing(principal.getName());
+        String username = currentUser.requireUsername(principal);
         List<GitTokenInfo> tokens = tokenService.getTokens(username);
         return ResponseEntity.ok(ApiResponseEntity.ok(tokens, "Tokens retrieved"));
     }
@@ -67,7 +71,7 @@ public class GitTokenController {
             Principal principal,
             @PathVariable Long tokenId) {
 
-        String username = Helper.removeAtSymbolAndFollowing(principal.getName());
+        String username = currentUser.requireUsername(principal);
         tokenService.revokeToken(username, tokenId);
 
         activityService.logActivity(ActivityType.TOKEN_REVOKED, username, String.valueOf(tokenId),

@@ -5,6 +5,7 @@ import org.os.gitbase.auth.entity.Role;
 import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.auth.repository.RoleRepository;
 import org.os.gitbase.auth.repository.UserRepository;
+import org.os.gitbase.auth.service.UsernameAllocator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService;
 import org.springframework.security.oauth2.client.userinfo.OAuth2UserRequest;
@@ -22,10 +23,13 @@ import java.util.Set;
 public class OAuth2UserService extends DefaultOAuth2UserService {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
-    
-    public OAuth2UserService(UserRepository userRepository, RoleRepository roleRepository) {
+    private final UsernameAllocator usernameAllocator;
+
+    public OAuth2UserService(UserRepository userRepository, RoleRepository roleRepository,
+                             UsernameAllocator usernameAllocator) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
+        this.usernameAllocator = usernameAllocator;
     }
     
     @Override
@@ -55,7 +59,8 @@ public class OAuth2UserService extends DefaultOAuth2UserService {
 
         User user = userRepository.findUserByEmail(oAuth2UserInfo.getEmail())
                 .map(existingUser -> updateExistingUser(existingUser, oAuth2UserInfo))
-                .orElse(registerNewUser(oAuth2UserInfo));
+                // orElseGet: orElse would evaluate (and attempt to insert) a new user on every login.
+                .orElseGet(() -> registerNewUser(oAuth2UserInfo));
 
         return UserPrincipal.create(user, oAuth2User.getAttributes());
     }
@@ -63,7 +68,9 @@ public class OAuth2UserService extends DefaultOAuth2UserService {
     private User registerNewUser(GoogleOAuth2UserInfo oAuth2UserInfo) {
         try {
             User user = new User(
-                    oAuth2UserInfo.getName(),// this one is mirror of FullName in user entity (this comment just a hint)
+                    // Username = unique namespace derived from the email, never the display name
+                    // (which has spaces and is not unique).
+                    usernameAllocator.allocate(oAuth2UserInfo.getEmail()),
                     oAuth2UserInfo.getName(),
                     oAuth2UserInfo.getEmail(),
                     oAuth2UserInfo.getId(),
@@ -95,7 +102,9 @@ public class OAuth2UserService extends DefaultOAuth2UserService {
 
     private User updateExistingUser(User existingUser, GoogleOAuth2UserInfo oAuth2UserInfo) {
         try {
-            existingUser.setName(oAuth2UserInfo.getName());
+            // Refresh the display name only. The username is the repository namespace and must not
+            // change on login — overwriting it renamed users and orphaned their repositories.
+            existingUser.setFullName(oAuth2UserInfo.getName());
             existingUser.setProfilePictureUrl(oAuth2UserInfo.getImageUrl());
             existingUser.setLastLogin(LocalDateTime.now());
             

@@ -13,6 +13,7 @@ public record IssueDto(
         List<UserSummaryDto> assignees,
         long commentsCount,
         UserSummaryDto closedBy,
+        Integer closedByPullNumber,    // set when a merged PR's closing keyword closed it
         Long createdAt,                // epoch millis
         Long updatedAt,
         Long closedAt

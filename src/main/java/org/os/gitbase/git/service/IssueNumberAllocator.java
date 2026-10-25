@@ -12,7 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Hands out the per-repository {@code #number} shared by issues and pull requests.
  *
- * <p>GitHub and Gitea both draw issues and PRs from a <b>single</b> sequence, so a repository reads
+ * <p>Issues and PRs draw from a <b>single</b> sequence, so a repository reads
  * #1, #2, #3 whatever the type. That is what makes a bare "#12" reference unambiguous, and it is
  * why this allocator exists rather than each table keeping its own counter.
  *
