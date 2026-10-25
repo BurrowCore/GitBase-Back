@@ -17,20 +17,29 @@ import org.os.gitbase.git.mapper.IssueMapper;
 import org.os.gitbase.git.mapper.LabelMapper;
 import org.os.gitbase.git.repository.GitRepositoryDB;
 import org.os.gitbase.git.repository.IssueCommentRepository;
+import org.os.gitbase.git.repository.IssueDependencyRepository;
 import org.os.gitbase.git.repository.IssueRepository;
+import org.os.gitbase.git.repository.IssueSpecifications;
 import org.os.gitbase.git.repository.LabelRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -50,6 +59,7 @@ public class IssueServiceImpl implements IssueService {
     private final ActivityService activityService;
     private final IssueMapper issueMapper;
     private final LabelMapper labelMapper;
+    private final IssueDependencyRepository dependencyRepository;
 
     public IssueServiceImpl(IssueRepository issueRepository,
                             IssueCommentRepository commentRepository,
@@ -59,7 +69,9 @@ public class IssueServiceImpl implements IssueService {
                             IssueNumberAllocator numberAllocator,
                             ActivityService activityService,
                             IssueMapper issueMapper,
-                            LabelMapper labelMapper) {
+                            LabelMapper labelMapper,
+                            IssueDependencyRepository dependencyRepository) {
+        this.dependencyRepository = dependencyRepository;
         this.issueRepository = issueRepository;
         this.commentRepository = commentRepository;
         this.labelRepository = labelRepository;
@@ -109,11 +121,20 @@ public class IssueServiceImpl implements IssueService {
         int safePage = Math.max(page, 0);
         Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "number"));
 
-        Page<Issue> result = issueRepository.search(
-                repo, parseState(state), blankToNull(label), blankToNull(assignee), blankToNull(search), pageable);
+        // Only the filters actually supplied become predicates — see IssueSpecifications.
+        Specification<Issue> spec = Specification
+                .where(IssueSpecifications.inRepository(repo))
+                .and(IssueSpecifications.hasState(parseState(state)))
+                .and(IssueSpecifications.hasLabel(label))
+                .and(IssueSpecifications.hasAssignee(assignee))
+                .and(IssueSpecifications.matches(search));
 
+        Page<Issue> result = issueRepository.findAll(spec, pageable);
+
+        // One grouped query for all the comment counts rather than one per row.
+        Map<Long, Long> commentCounts = countCommentsFor(result.getContent());
         List<IssueSummaryDto> rows = result.getContent().stream()
-                .map(issue -> issueMapper.toSummary(issue, commentRepository.countByIssue(issue)))
+                .map(issue -> issueMapper.toSummary(issue, commentCounts.getOrDefault(issue.getId(), 0L)))
                 .toList();
 
         return new IssuePageDto(rows, safePage, safeSize, result.getTotalElements(), result.getTotalPages(),
@@ -166,6 +187,13 @@ public class IssueServiceImpl implements IssueService {
         if (issue.getState() == IssueState.CLOSED) {
             throw new InvalidStateException("Issue #" + number + " is already closed");
         }
+        // An issue with open dependencies cannot be closed by hand (a merge still can).
+        List<Integer> blockers = dependencyRepository.findBlockerNumbers(issue, IssueState.OPEN, PageRequest.of(0, 5));
+        if (!blockers.isEmpty()) {
+            throw new InvalidStateException("Issue #" + number + " is blocked by open issue(s) "
+                    + blockers.stream().map(n -> "#" + n).collect(Collectors.joining(", "))
+                    + " — close those first or remove the dependency");
+        }
 
         issue.setState(IssueState.CLOSED);
         issue.setClosedAt(LocalDateTime.now());
@@ -189,11 +217,38 @@ public class IssueServiceImpl implements IssueService {
         issue.setState(IssueState.OPEN);
         issue.setClosedAt(null);
         issue.setClosedBy(null);
+        issue.setClosedByPullNumber(null);
 
         activityService.logActivity(ActivityType.REPO_UPDATED, actor, repoName,
                 "[ " + repoName + " ] Reopened issue #" + number);
 
         return toDto(issueRepository.save(issue));
+    }
+
+    @Override
+    // Own transaction: it runs after the merge has committed (see IssueAutoCloseListener).
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public List<Integer> closeByPullRequest(UUID repositoryId, Collection<Integer> numbers,
+                                            String mergedBy, int pullNumber) {
+        if (numbers == null || numbers.isEmpty()) {
+            return List.of();
+        }
+        RepositoryGit repo = repositoryDB.findById(repositoryId)
+                .orElseThrow(() -> new ResourceNotFoundException("Repository not found: " + repositoryId));
+        User merger = requireUser(mergedBy);
+
+        List<Integer> closed = new ArrayList<>();
+        for (Issue issue : issueRepository.findByRepositoryAndStateAndNumberIn(repo, IssueState.OPEN, numbers)) {
+            issue.setState(IssueState.CLOSED);
+            issue.setClosedAt(LocalDateTime.now());
+            issue.setClosedBy(merger);
+            issue.setClosedByPullNumber(pullNumber);
+            closed.add(issue.getNumber());
+            activityService.logActivity(ActivityType.REPO_UPDATED, mergedBy, repo.getRepoName(),
+                    "[ " + repo.getRepoName() + " ] Closed issue #" + issue.getNumber()
+                            + " via pull request #" + pullNumber);
+        }
+        return closed;
     }
 
     // ────────────────────────── comments ──────────────────────────
@@ -267,6 +322,18 @@ public class IssueServiceImpl implements IssueService {
 
     // ────────────────────────── helpers ──────────────────────────
 
+    /** Comment counts for a page of issues, keyed by issue id, in a single query. */
+    private Map<Long, Long> countCommentsFor(List<Issue> issues) {
+        if (issues.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Long> counts = new HashMap<>();
+        for (Object[] row : commentRepository.countByIssues(issues)) {
+            counts.put((Long) row[0], (Long) row[1]);
+        }
+        return counts;
+    }
+
     private IssueDto toDto(Issue issue) {
         return issueMapper.toDto(issue, commentRepository.countByIssue(issue));
     }
@@ -298,7 +365,11 @@ public class IssueServiceImpl implements IssueService {
         }
         for (String username : usernames) {
             if (StringUtils.hasText(username)) {
-                assignees.add(requireUser(username.trim()));
+                User assignee = requireUser(username.trim());
+                if (assignee.isOrganization()) {
+                    throw new IllegalArgumentException(username.trim() + " is an organization and cannot be assigned");
+                }
+                assignees.add(assignee);
             }
         }
         return assignees;
@@ -313,10 +384,6 @@ public class IssueServiceImpl implements IssueService {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Unknown state '" + state + "' (expected OPEN, CLOSED or ALL)");
         }
-    }
-
-    private String blankToNull(String value) {
-        return StringUtils.hasText(value) ? value.trim() : null;
     }
 
     private RepositoryGit requireRepository(String owner, String repoName) {
@@ -337,8 +404,7 @@ public class IssueServiceImpl implements IssueService {
     }
 
     /**
-     * Editing an issue is limited to its author and anyone with write access — the rule Gitea
-     * applies. Write access is resolved by the controller (it needs the Principal) and passed in.
+     * Editing an issue is limited to its author and anyone with write access. Write access is resolved by the controller (it needs the Principal) and passed in.
      */
     private void requireAuthorOrWriter(Issue issue, String actor, boolean actorHasWriteAccess, String action) {
         boolean isAuthor = issue.getAuthor() != null && actor.equals(issue.getAuthor().getName());

@@ -16,7 +16,10 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 public class CreateRepositoryDto {
 
-    @NotBlank(message = "username is required")
+    /**
+     * Optional owner namespace: blank means the caller's own account; otherwise an organization the
+     * caller may create repositories in. Anything else is rejected with 403.
+     */
     private String username;
 
     @NotBlank(message = "repoName is required")

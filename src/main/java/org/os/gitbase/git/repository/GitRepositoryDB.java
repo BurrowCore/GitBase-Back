@@ -15,6 +15,11 @@ import java.util.UUID;
 @org.springframework.stereotype.Repository
 public interface GitRepositoryDB extends JpaRepository<RepositoryGit, UUID> {
     List<RepositoryGit> findByOwner(User owner);
+
+    org.springframework.data.domain.Page<RepositoryGit> findByOwnerOrderByRepoNameAsc(
+            User owner, org.springframework.data.domain.Pageable pageable);
+
+    long countByOwner(User owner);
     Optional<RepositoryGit> findByOwnerNameAndRepoName(String ownerName, String repoName);
 
     /**

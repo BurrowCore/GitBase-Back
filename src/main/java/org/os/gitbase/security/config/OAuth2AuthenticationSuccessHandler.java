@@ -18,7 +18,7 @@ import org.os.gitbase.auth.repository.RoleRepository;
 import org.os.gitbase.auth.repository.UserRepository;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.google.UserPrincipal;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.auth.service.UsernameAllocator;
 import org.os.gitbase.jwt.JwtTokenProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -61,6 +61,12 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
     private String frontendRedirectUri;
     private final ObjectMapper objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule());
+
+    private final UsernameAllocator usernameAllocator;
+
+    public OAuth2AuthenticationSuccessHandler(UsernameAllocator usernameAllocator) {
+        this.usernameAllocator = usernameAllocator;
+    }
 
 
 
@@ -114,7 +120,7 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
             User user = userRepository.findUserByEmail(email).orElseGet(() -> {
                 User newUser = new User();
                 newUser.setEmail(email);
-                newUser.setName(Helper.removeAtSymbolAndFollowing(name));
+                newUser.setName(usernameAllocator.allocate(email));
                 newUser.setProfilePictureUrl(profilePictureUrl);
                 newUser.setAuthProvider(AuthProvider.GOOGLE);
                 newUser.setEmailVerified(true);

@@ -4,6 +4,7 @@ import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.git.entity.Collaborator;
 import org.os.gitbase.git.entity.RepositoryGit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -29,6 +30,12 @@ public interface CollaboratorRepository extends JpaRepository<Collaborator, UUID
     List<Collaborator> findByRepository(@Param("repository") RepositoryGit repository);
 
     void deleteByRepositoryAndUser(RepositoryGit repository, User user);
+
+    /** Drops grants held by owners of {@code org} — after a transfer into it they are redundant. */
+    @Modifying
+    @Query("DELETE FROM Collaborator c WHERE c.repository = :repository AND c.user IN "
+            + "(SELECT m.user FROM TeamMember m WHERE m.team.organization = :org AND m.team.ownerTeam = true)")
+    void deleteOrganizationOwnersOf(@Param("repository") RepositoryGit repository, @Param("org") User org);
 
     /**
      * Names of repositories in {@code owner}'s namespace that {@code username} collaborates on.

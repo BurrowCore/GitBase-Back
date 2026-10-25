@@ -10,6 +10,8 @@ public class RepositoryInfo {
     private String repoName;
     private boolean isPrivate;
     private long lastCommitTime; // epoch millis
+    /** The viewer's permissions; filled in by the controller, which knows who is asking. */
+    private RepositoryPermissionsDto permissions;
 
     public RepositoryInfo(String username, String repoName, boolean isPrivate, long lastCommitTime) {
         this.username = username;

@@ -3,7 +3,7 @@ package org.os.gitbase.git.controller;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.git.entity.Activity;
 import org.os.gitbase.git.service.ActivityService;
-import org.os.gitbase.helper.Helper;
+import org.os.gitbase.security.CurrentUserResolver;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,14 +21,17 @@ public class ActivityController {
 
     private final ActivityService activityService;
 
-    public ActivityController(ActivityService activityService) {
+    private final CurrentUserResolver currentUser;
+
+    public ActivityController(ActivityService activityService, CurrentUserResolver currentUser) {
         this.activityService = activityService;
+        this.currentUser = currentUser;
     }
 
     @GetMapping(RECENT_ACTIVITIES)
     public ResponseEntity<ApiResponseEntity<List<Activity>>> getRecentActivities(Principal principal) {
         List<Activity> activities = activityService.getRecentActivities(
-                Helper.removeAtSymbolAndFollowing(principal.getName()));
+                currentUser.requireUsername(principal));
         return ResponseEntity.ok(ApiResponseEntity.ok(activities, "Recent activities retrieved"));
     }
 }

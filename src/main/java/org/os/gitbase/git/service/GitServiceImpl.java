@@ -1,7 +1,6 @@
 package org.os.gitbase.git.service;
 
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.LogCommand;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -16,9 +15,6 @@ import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
-import org.eclipse.jgit.transport.ReceivePack;
-import org.eclipse.jgit.transport.RefAdvertiser;
-import org.eclipse.jgit.transport.UploadPack;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.EmptyTreeIterator;
@@ -39,17 +35,18 @@ import org.os.gitbase.git.dto.RawFileDto;
 import org.os.gitbase.git.dto.RepositoryInfo;
 import org.os.gitbase.git.dto.RepositoryTreeDto;
 import org.os.gitbase.git.entity.RepositoryGit;
-import org.os.gitbase.git.hook.CodeReviewHook;
 import org.os.gitbase.git.repository.GitRepositoryDB;
 import org.os.gitbase.exception.ConflictException;
 import org.os.gitbase.exception.ResourceNotFoundException;
+import org.os.gitbase.git.repository.RepositoryPurgeRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,22 +60,32 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
+@Slf4j
 @Service
 public class GitServiceImpl implements GitService {
 
-    private final String repositoriesPath = "./gitbase/repositories";
+    private final String repositoriesPath;
     private static final Pattern VALID_REPO_NAME = Pattern.compile("^[a-zA-Z0-9._-]+$");
     private static final Pattern VALID_USERNAME = Pattern.compile("^[a-zA-Z0-9._-]+$");
     private final GitRepositoryDB gitRepositoryDB;
     private final UserRepository userRepository;
-    public GitServiceImpl(GitRepositoryDB gitRepositoryDB, UserRepository userRepository) {
+    private final RepositoryPurgeRepository purgeRepository;
+    public GitServiceImpl(GitRepositoryDB gitRepositoryDB, UserRepository userRepository,
+                          RepositoryPurgeRepository purgeRepository,
+                          @Value("${gitbase.repositories-path:./gitbase/repositories}") String repositoriesPath) {
+        this.repositoriesPath = repositoriesPath;
         this.gitRepositoryDB = gitRepositoryDB;
         this.userRepository = userRepository;
+        this.purgeRepository = purgeRepository;
     }
 
-    public void createRepository(String user, String repoName, boolean isPrivate) {
+    public void createRepository(String user, String repoName, boolean isPrivate, String defaultBranch) {
         validateUsername(user);
         validateRepositoryName(repoName);
+        String branch = defaultBranch == null || defaultBranch.isBlank() ? "main" : defaultBranch.trim();
+        if (!Repository.isValidRefName(Constants.R_HEADS + branch)) {
+            throw new IllegalArgumentException("Invalid default branch name: " + branch);
+        }
 
         String repoPath = repositoriesPath + "/" + user + "/" + repoName + ".git";
 
@@ -89,9 +96,13 @@ public class GitServiceImpl implements GitService {
             org.eclipse.jgit.lib.Repository repo =
                     FileRepositoryBuilder.create(new File(repoPath));
             repo.create(true);
+            // JGit initialises HEAD → refs/heads/master, but the push instructions we hand out use the
+            // chosen default branch (main). A HEAD pointing at a branch that never exists breaks every
+            // "default branch" read: repo-info (and with it the viewer's permissions, so the merge
+            // button vanished), the README, and closing keywords on merge.
+            repo.updateRef(Constants.HEAD).link(Constants.R_HEADS + branch);
 
             StoredConfig config = repo.getConfig();
-            config.setBoolean("http", null, "receivepack", true);
             config.setBoolean("core", null, "bare", true);
             config.setString("gitbase", null, "visibility", isPrivate ? "private" : "public");
             config.save();
@@ -107,37 +118,6 @@ public class GitServiceImpl implements GitService {
 
         } catch (IOException e) {
             throw new RuntimeException("Failed to create repository: " + user+ "/" + repoName, e);
-        }
-    }
-
-    public void handleReceivePack(String username, String repoName,
-                                  HttpServletRequest request,
-                                  HttpServletResponse response) {
-        // Validate inputs
-        validateUsername(username);
-        validateRepositoryName(repoName);
-
-        String repoPath = getRepositoryPath(username, repoName);
-
-        // Check if repository exists
-        if (!repositoryExists(username, repoName)) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-
-        try (Repository repo = new FileRepositoryBuilder()
-                .setGitDir(new File(repoPath))
-                .readEnvironment()
-                .build()) {
-
-            ReceivePack receivePack = new ReceivePack(repo);
-            receivePack.setPreReceiveHook(new CodeReviewHook());
-
-            response.setContentType("application/x-git-receive-pack-result");
-            receivePack.receive(request.getInputStream(), response.getOutputStream(), null);
-
-        } catch (Exception e) {
-            throw new RuntimeException("Git receive-pack failed for " + username + "/" + repoName, e);
         }
     }
 
@@ -246,7 +226,8 @@ public class GitServiceImpl implements GitService {
 
     public List<RepositoryTreeDto> listRepositories(String user) {
         List<RepositoryGit> repos = gitRepositoryDB.findByOwner(
-                userRepository.findUserByName(user).get()
+                userRepository.findUserByName(user)
+                        .orElseThrow(() -> new ResourceNotFoundException("User or organization not found: " + user))
         );
 
         List<RepositoryTreeDto> result = new ArrayList<>();
@@ -389,6 +370,12 @@ public class GitServiceImpl implements GitService {
      * @param repoName the repository name
      */
     @Override
+    /**
+     * One transaction: issues, pull requests, labels, collaborators and team grants go first (none
+     * of their foreign keys cascade), then the row, then the files. If the filesystem delete fails
+     * the whole database change rolls back, so the repository is never half-deleted.
+     */
+    @Transactional
     public void deleteRepository(String username, String repoName) {
         validateUsername(username);
         validateRepositoryName(repoName);
@@ -397,9 +384,9 @@ public class GitServiceImpl implements GitService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Repository not found: " + username + "/" + repoName));
 
-        // Remove metadata first so the repo disappears from listings even if the
-        // filesystem delete partially fails.
+        purgeRepository.purgeChildrenOf(entity.getId());
         gitRepositoryDB.delete(entity);
+        gitRepositoryDB.flush();
 
         String repoPath = getRepositoryPath(username, repoName);
         try {
@@ -424,27 +411,21 @@ public class GitServiceImpl implements GitService {
 
         String repoPath = Paths.get(repositoriesPath, username, repoName + ".git").toString();
 
-        try (Repository repo = new FileRepositoryBuilder()
-                .setGitDir(new File(repoPath))
-                .build();
-             Git git = new Git(repo)) {
-
-            // ✅ Fetch last commit
-            Iterable<RevCommit> commits = git.log().setMaxCount(1).call();
-            long lastCommitTime = commits.iterator().hasNext()
-                    ? commits.iterator().next().getCommitTime() * 1000L
-                    : 0L;
-
-            return new RepositoryInfo(
-                    username,
-                    repoEntity.getRepoName(),
-                    repoEntity.isPrivate(),
-                    lastCommitTime
-            );
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to get repository info: " + username + "/" + repoName, e);
+        // The last-commit time is decoration: an empty repository, or a HEAD pointing at a branch
+        // that does not exist, must not fail this endpoint — the UI reads the viewer's permissions
+        // from it, and a 500 here used to hide the merge button.
+        long lastCommitTime = 0L;
+        try (Repository repo = new FileRepositoryBuilder().setGitDir(new File(repoPath)).build();
+             RevWalk walk = new RevWalk(repo)) {
+            ObjectId head = resolveHead(repo); // also repairs a dangling HEAD
+            if (head != null) {
+                lastCommitTime = walk.parseCommit(head).getCommitTime() * 1000L;
+            }
+        } catch (IOException | RuntimeException e) {
+            log.warn("Could not read last commit of {}/{}: {}", username, repoName, e.getMessage());
         }
+
+        return new RepositoryInfo(username, repoEntity.getRepoName(), repoEntity.isPrivate(), lastCommitTime);
     }
 
     /**
@@ -1191,73 +1172,6 @@ public class GitServiceImpl implements GitService {
                 .sorted(java.util.Comparator.reverseOrder())
                 .map(Path::toFile)
                 .forEach(File::delete);
-    }
-
-    public void handleUploadPack(String username, String repoName,
-                                 HttpServletRequest request,
-                                 HttpServletResponse response) {
-        validateUsername(username);
-        validateRepositoryName(repoName);
-
-        String repoPath = getRepositoryPath(username, repoName);
-
-        if (!repositoryExists(username, repoName)) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-
-        try (Repository repo = new FileRepositoryBuilder()
-                .setGitDir(new File(repoPath))
-                .readEnvironment()
-                .build()) {
-
-            UploadPack uploadPack = new UploadPack(repo);
-            response.setContentType("application/x-git-upload-pack-result");
-            uploadPack.upload(request.getInputStream(), response.getOutputStream(), null);
-
-        } catch (Exception e) {
-            throw new RuntimeException("Git upload-pack failed for " + username + "/" + repoName, e);
-        }
-    }
-
-    public void handleInfoRefs(String username, String repoName, String service, HttpServletResponse response) {
-        validateUsername(username);
-        validateRepositoryName(repoName);
-
-        String repoPath = getRepositoryPath(username, repoName);
-
-        if (!repositoryExists(username, repoName)) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-
-        try (Repository repo = new FileRepositoryBuilder()
-                .setGitDir(new File(repoPath))
-                .readEnvironment()
-                .build();
-             OutputStream out = response.getOutputStream()) {
-
-            if ("git-upload-pack".equals(service)) {
-                response.setContentType("application/x-git-upload-pack-advertisement");
-
-                UploadPack uploadPack = new UploadPack(repo);
-                RefAdvertiser.PacketLineOutRefAdvertiser advertiser =
-                        new RefAdvertiser.PacketLineOutRefAdvertiser(new org.eclipse.jgit.transport.PacketLineOut(out));
-                uploadPack.sendAdvertisedRefs(advertiser);
-            } else if ("git-receive-pack".equals(service)) {
-                response.setContentType("application/x-git-receive-pack-advertisement");
-
-                ReceivePack rp = new ReceivePack(repo);
-                RefAdvertiser.PacketLineOutRefAdvertiser advertiser =
-                        new RefAdvertiser.PacketLineOutRefAdvertiser(new org.eclipse.jgit.transport.PacketLineOut(out));
-                rp.sendAdvertisedRefs(advertiser);
-            } else {
-                response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-            }
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to handle info/refs for " + username + "/" + repoName, e);
-        }
     }
 
 }

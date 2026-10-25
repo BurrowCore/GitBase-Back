@@ -10,12 +10,12 @@ import org.os.gitbase.auth.entity.Role;
 import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.auth.entity.jwt.RefreshToken;
 import org.os.gitbase.auth.service.UserService;
+import org.os.gitbase.auth.service.UsernameAllocator;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.constant.Constant;
 
 import org.os.gitbase.google.GoogleTokenVerifier;
 import org.os.gitbase.google.GoogleUserInfo;
-import org.os.gitbase.helper.Helper;
 import org.os.gitbase.jwt.JwtTokenProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -44,16 +44,19 @@ public class AuthController {
     private final GoogleTokenVerifier googleTokenVerifier;
     private final SecurityContextLogoutHandler logoutHandler;
     private final PasswordEncoder passwordEncoder;
-    
+    private final UsernameAllocator usernameAllocator;
+
     @Autowired(required = false)
     private OAuth2AuthorizedClientService authorizedClientService;
 
-    public AuthController(UserService userService, JwtTokenProvider jwtTokenProvider, GoogleTokenVerifier googleTokenVerifier, SecurityContextLogoutHandler logoutHandler, PasswordEncoder passwordEncoder) {
+    public AuthController(UserService userService, JwtTokenProvider jwtTokenProvider, GoogleTokenVerifier googleTokenVerifier, SecurityContextLogoutHandler logoutHandler, PasswordEncoder passwordEncoder,
+                          UsernameAllocator usernameAllocator) {
         this.userService = userService;
         this.jwtTokenProvider = jwtTokenProvider;
         this.googleTokenVerifier = googleTokenVerifier;
         this.logoutHandler = logoutHandler;
         this.passwordEncoder = passwordEncoder;
+        this.usernameAllocator = usernameAllocator;
     }
 
     /**
@@ -92,7 +95,8 @@ public class AuthController {
 
             // Create new user
             User newUser = new User();
-            newUser.setName(Helper.removeAtSymbolAndFollowing(registerDTO.getEmail()));
+            // Unique username (alice, alice-2, …) — never the bare email local part, which collides.
+            newUser.setName(usernameAllocator.allocate(registerDTO.getEmail()));
             newUser.setFullName(registerDTO.getFullName());
             newUser.setEmail(registerDTO.getEmail());
             newUser.setPassword(passwordEncoder.encode(registerDTO.getPassword()));

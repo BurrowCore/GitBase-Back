@@ -35,8 +35,7 @@ public class RepositoryGit {
 
     /**
      * Highest #number handed out in this repository. Issues and pull requests draw from this ONE
-     * sequence, so a repo reads #1, #2, #3 regardless of type — the behaviour GitHub and Gitea both
-     * have, and what makes a bare "#12" reference unambiguous.
+     * sequence, so a repo reads #1, #2, #3 regardless of type — which is what makes a bare "#12" reference unambiguous.
      *
      * <p>Nullable on purpose: {@code ddl-auto: update} cannot add a NOT NULL column to a table that
      * already has rows, so the column is added nullable with a default and the allocator treats a

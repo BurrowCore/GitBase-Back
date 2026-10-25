@@ -62,6 +62,10 @@ public class CollaboratorServiceImpl implements CollaboratorService {
 
         User user = userRepository.findUserByName(target)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found: " + target));
+        if (user.isOrganization()) {
+            // Organizations act through their teams; grant a team access instead.
+            throw new IllegalArgumentException(target + " is an organization, not a user");
+        }
 
         // Upsert: adding an existing collaborator updates their level rather than failing.
         Collaborator grant = collaboratorRepository.findByRepositoryAndUser(repo, user)
@@ -95,7 +99,7 @@ public class CollaboratorServiceImpl implements CollaboratorService {
 
         collaboratorRepository.delete(grant);
 
-        // Their existing issues and pull requests are deliberately left untouched (as Gitea does) —
+        // Their existing issues and pull requests are deliberately left untouched —
         // removing access should not rewrite history they authored.
         activityService.logActivity(ActivityType.REPO_UPDATED, owner, repoName,
                 "[ " + repoName + " ] " + target + "'s access was revoked");

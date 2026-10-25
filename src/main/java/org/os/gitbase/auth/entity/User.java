@@ -26,7 +26,11 @@ import org.springframework.security.core.userdetails.UserDetails;
 @Table(name = "t_users",
         uniqueConstraints = {
                 @UniqueConstraint(columnNames = "email"),
-                @UniqueConstraint(columnNames = "google_id")
+                @UniqueConstraint(columnNames = "google_id"),
+                // The username is the repository namespace and the identity every permission check
+                // uses — duplicates let one account act as another's owner. New names are allocated
+                // by UsernameAllocator, which also rejects case-insensitive clashes.
+                @UniqueConstraint(name = "uk_users_name", columnNames = "name")
         })
 @EntityListeners(AuditingEntityListener.class)
 @Getter
@@ -42,6 +46,19 @@ public class User implements UserDetails {
 
     @Size(max = 255)
     private String fullName;
+
+    /**
+     * USER or ORGANIZATION. Null on rows created before organizations
+     * existed — read it through {@link #isOrganization()}, which treats null as USER.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "account_type", length = 16, columnDefinition = "varchar(16) default 'USER'")
+    private AccountType accountType = AccountType.USER;
+
+    /** Profile description; used by organizations. */
+    @Size(max = 500)
+    @Column(name = "description", length = 500)
+    private String description;
 
     @NotBlank
     @Email
@@ -137,6 +154,11 @@ public class User implements UserDetails {
     @Override
     public boolean isEnabled() {
         return isEnabled;
+    }
+
+    /** True for organization accounts; rows predating organizations (null type) are users. */
+    public boolean isOrganization() {
+        return accountType == AccountType.ORGANIZATION;
     }
 
 

@@ -6,13 +6,11 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.transport.resolver.RepositoryResolver;
 import org.os.gitbase.security.RepositoryAccessGuard;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.io.IOException;
-import java.security.Principal;
 
 /**
  * Resolves a bare repository for the JGit {@code GitServlet} (the {@code /gitbase/*} smart-HTTP
@@ -22,22 +20,26 @@ import java.security.Principal;
  *   <li><b>Path jail</b> — the requested {@code owner/repo.git} name is rejected if it could
  *       escape the repositories root (path-traversal), before any filesystem access.</li>
  *   <li><b>Visibility</b> — public repos are readable by any authenticated user; private repos
- *       only by their owner. A denied/absent repo is masked as "not found" so private
- *       repositories cannot be enumerated over git.</li>
+ *       only by their owner and collaborators. A denied/absent repo is masked as "not found" so
+ *       private repositories cannot be enumerated over git.</li>
  * </ol>
  *
  * <p>This closes the git-CLI clone/pull path: without it, any user holding a valid git token
- * could clone anyone else's private repository.
+ * could clone anyone else's private repository. It is the <b>read</b> gate only — push is
+ * additionally gated on write access by {@link GitbaseReceivePackFactory}.
  */
 @Component
 public class GitbaseRepositoryResolver implements RepositoryResolver<HttpServletRequest> {
 
-    private static final String BASE_PATH = "./gitbase/repositories";
-
     private final RepositoryAccessGuard accessGuard;
 
-    public GitbaseRepositoryResolver(RepositoryAccessGuard accessGuard) {
+    /** Root of the bare-repository store. Configurable so tests can point at a temp directory. */
+    private final String basePath;
+
+    public GitbaseRepositoryResolver(RepositoryAccessGuard accessGuard,
+                                     @Value("${gitbase.repositories-path:./gitbase/repositories}") String basePath) {
         this.accessGuard = accessGuard;
+        this.basePath = basePath;
     }
 
     @Override
@@ -66,13 +68,13 @@ public class GitbaseRepositoryResolver implements RepositoryResolver<HttpServlet
         // 3. Visibility gate. Denied/absent are both surfaced as "not found" (404) so a
         //    non-owner cannot tell a hidden private repo from one that does not exist.
         try {
-            accessGuard.requireReadAccess(owner, repoName, resolvePrincipal(req));
+            accessGuard.requireReadAccess(owner, repoName, GitRequestPrincipal.of(req));
         } catch (RuntimeException denied) {
             throw new RepositoryNotFoundException(name, denied);
         }
 
         // 4. Open the bare repository on disk.
-        File repoDir = new File(BASE_PATH, normalized);
+        File repoDir = new File(basePath, normalized);
         if (!repoDir.exists()) {
             throw new RepositoryNotFoundException(name);
         }
@@ -81,15 +83,5 @@ public class GitbaseRepositoryResolver implements RepositoryResolver<HttpServlet
         } catch (IOException e) {
             throw new RepositoryNotFoundException(name, e);
         }
-    }
-
-    /** The authenticated caller — from the request, falling back to the security context. */
-    private Principal resolvePrincipal(HttpServletRequest req) {
-        Principal principal = req.getUserPrincipal();
-        if (principal != null) {
-            return principal;
-        }
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        return (auth != null && auth.isAuthenticated()) ? auth : null;
     }
 }

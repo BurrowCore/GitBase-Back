@@ -18,12 +18,11 @@ import static org.os.gitbase.constant.Constant.GITBASE_MAPPING_REQUEST;
 /**
  * Repository collaborator management.
  *
- * <p><b>Owner-only.</b> Following Gitea, even an ADMIN collaborator cannot manage the collaborator
+ * <p><b>Owner-only.</b> even an ADMIN collaborator cannot manage the collaborator
  * list — that and repository deletion stay with the owner. Reading the list only needs read access,
  * so collaborators can see who else they are working with.
  *
- * <p>A grant takes effect immediately; there is no invitation/acceptance step (Gitea's behaviour,
- * unlike GitHub's).
+ * <p>A grant takes effect immediately; there is no invitation/acceptance
  */
 @RestController
 @RequestMapping(GITBASE_MAPPING_REQUEST + "/{username}/{repoName}/collaborators")

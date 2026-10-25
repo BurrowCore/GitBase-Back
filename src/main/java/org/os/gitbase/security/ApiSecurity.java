@@ -89,31 +89,16 @@ public class ApiSecurity {
     @Order(1)
     public SecurityFilterChain gitSecurity(HttpSecurity http,
                                            GitTokenAuthenticationProvider gitTokenAuthenticationProvider) throws Exception {
-        System.out.println("=== Configuring Git Security Filter Chain ===");
-
         http
-                .securityMatcher(request -> {
-                    String uri = request.getRequestURI();
-                    boolean matches = uri.startsWith("/gitbase/");
-                    System.out.println("Security matcher check - URI: " + uri + ", Matches: " + matches);
-                    return matches;
-                })
+                .securityMatcher(request -> request.getRequestURI().startsWith("/gitbase/"))
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(gitTokenAuthenticationProvider)
-                .httpBasic(httpBasic -> {
-                    httpBasic.authenticationEntryPoint((request, response, authException) -> {
-                        System.out.println("=== HTTP Basic Authentication Entry Point ===");
-                        System.out.println("Auth exception: " + authException.getMessage());
-                        System.out.println("Request URI: " + request.getRequestURI());
-                        response.setHeader("WWW-Authenticate", "Basic realm=\"Git Repository\"");
-                        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, authException.getMessage());
-                    });
-                })
-                .authorizeHttpRequests(auth -> {
-                    System.out.println("=== Configuring authorization rules ===");
-                    auth.anyRequest().authenticated();
-                });
+                .httpBasic(httpBasic -> httpBasic.authenticationEntryPoint((request, response, authException) -> {
+                    response.setHeader("WWW-Authenticate", "Basic realm=\"Git Repository\"");
+                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, authException.getMessage());
+                }))
+                .authorizeHttpRequests(auth -> auth.anyRequest().authenticated());
 
         return http.build();
     }
