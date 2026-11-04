@@ -36,8 +36,6 @@ spring:
     driver-class-name: org.postgresql.Driver
   jpa:
     show-sql: true
-#  flyway:
-#    clean-disabled: false
 app:
   oauth2:
     failure-redirect-uri: http://localhost:5173/login
@@ -56,14 +54,14 @@ management:
   endpoints:
     web:
       exposure:
-        include: "health,info,metrics,env,beans"
+        include: "health,info,metrics,env,beans,flyway"
   endpoint:
     health:
       show-details: always
     metrics:
       access: read_only
-#    flyway:
-#      access: read_only
+    flyway:
+      access: read_only
     env:
       access: read_only
 jwt-keys:

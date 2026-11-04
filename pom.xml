@@ -73,16 +73,15 @@
 			<scope>test</scope>
 		</dependency>
 
-		<!--setting the dependencies of flyway-->
-<!--		<dependency>-->
-<!--			<groupId>org.flywaydb</groupId>-->
-<!--			<artifactId>flyway-core</artifactId>-->
-<!--		</dependency>-->
-<!--		<dependency>-->
-<!--			<groupId>org.flywaydb</groupId>-->
-<!--			<artifactId>flyway-database-postgresql</artifactId>-->
-<!--		</dependency>-->
-		<!--END-->
+		<!-- Flyway owns the schema: src/main/resources/db/migration (versions managed by Spring Boot) -->
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-database-postgresql</artifactId>
+		</dependency>
 		<!--JWT dependencies-->
 		<dependency>
 			<groupId>io.jsonwebtoken</groupId>
@@ -189,16 +188,6 @@
 					</excludes>
 				</configuration>
 			</plugin>
-			<!--			Configure flyway plugin for using flyway:migration or flyway:clean -->
-<!--			<plugin>-->
-<!--				<groupId>org.flywaydb</groupId>-->
-<!--				<artifactId>flyway-maven-plugin</artifactId>-->
-<!--				<configuration>-->
-<!--					<url>jdbc:postgresql://localhost:5432/gitbase_dev</url>-->
-<!--					<user>root</user>-->
-<!--					<password>root</password>-->
-<!--				</configuration>-->
-<!--			</plugin>-->
 		</plugins>
 	</build>
 

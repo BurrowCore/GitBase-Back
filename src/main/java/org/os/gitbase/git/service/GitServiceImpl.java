@@ -86,6 +86,11 @@ public class GitServiceImpl implements GitService {
         if (!Repository.isValidRefName(Constants.R_HEADS + branch)) {
             throw new IllegalArgumentException("Invalid default branch name: " + branch);
         }
+        // Checked before anything touches the disk. Ignoring case: the folder is {owner}/{name}.git, and
+        // on a case-insensitive file system "Foo" and "foo" are the same folder.
+        if (gitRepositoryDB.existsByOwnerNameAndRepoNameIgnoreCase(user, repoName)) {
+            throw new ConflictException(user + " already has a repository named " + repoName);
+        }
 
         String repoPath = repositoriesPath + "/" + user + "/" + repoName + ".git";
 

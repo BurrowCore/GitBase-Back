@@ -1,0 +1,8 @@
+# Tests run in their own schema, built only by the Flyway migrations (never by Hibernate), so every
+# test run proves that db/migration produces exactly the schema the entities expect.
+# Overrides src/main/resources/application-dev.yml: classpath:config/ wins over the classpath root.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/gitbase_dev?currentSchema=gitbase_test
+  flyway:
+    schemas: gitbase_test
