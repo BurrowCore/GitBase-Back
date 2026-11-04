@@ -46,3 +46,7 @@ management:
 jwt-keys:
   private_key: ${PRIV_KEY}
   public_key: ${PUB_KEY}
+# Auth cookies are only sent over HTTPS in production (DECISION-016).
+gitbase:
+  cookies:
+    secure: true

@@ -8,28 +8,26 @@ import lombok.extern.slf4j.Slf4j;
 import org.os.gitbase.auth.dto.*;
 import org.os.gitbase.auth.entity.Role;
 import org.os.gitbase.auth.entity.User;
-import org.os.gitbase.auth.entity.jwt.RefreshToken;
 import org.os.gitbase.auth.service.UserService;
 import org.os.gitbase.auth.service.UsernameAllocator;
+import org.os.gitbase.auth.service.AuthCookies;
+import org.os.gitbase.auth.service.AuthSessionService;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.constant.Constant;
 
 import org.os.gitbase.google.GoogleTokenVerifier;
 import org.os.gitbase.google.GoogleUserInfo;
-import org.os.gitbase.jwt.JwtTokenProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
-import org.springframework.security.web.authentication.logout.SecurityContextLogoutHandler;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.ResponseCookie;
 
 import java.time.Instant;
-import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -40,23 +38,26 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 public class AuthController {
 
     private final UserService userService;
-    private final JwtTokenProvider jwtTokenProvider;
     private final GoogleTokenVerifier googleTokenVerifier;
-    private final SecurityContextLogoutHandler logoutHandler;
     private final PasswordEncoder passwordEncoder;
     private final UsernameAllocator usernameAllocator;
+    private final AuthSessionService sessionService;
+    private final AuthCookies authCookies;
+
+    private static final long ACCESS_TOKEN_SECONDS = AuthSessionService.ACCESS_TOKEN_TTL.toSeconds();
 
     @Autowired(required = false)
     private OAuth2AuthorizedClientService authorizedClientService;
 
-    public AuthController(UserService userService, JwtTokenProvider jwtTokenProvider, GoogleTokenVerifier googleTokenVerifier, SecurityContextLogoutHandler logoutHandler, PasswordEncoder passwordEncoder,
-                          UsernameAllocator usernameAllocator) {
+    public AuthController(UserService userService, GoogleTokenVerifier googleTokenVerifier, PasswordEncoder passwordEncoder,
+                          UsernameAllocator usernameAllocator, AuthSessionService sessionService,
+                          AuthCookies authCookies) {
         this.userService = userService;
-        this.jwtTokenProvider = jwtTokenProvider;
         this.googleTokenVerifier = googleTokenVerifier;
-        this.logoutHandler = logoutHandler;
         this.passwordEncoder = passwordEncoder;
         this.usernameAllocator = usernameAllocator;
+        this.sessionService = sessionService;
+        this.authCookies = authCookies;
     }
 
     /**
@@ -135,24 +136,17 @@ public class AuthController {
             HttpServletResponse response) {
         try {
             // Authenticate user
-            Map<String, ResponseCookie> cookies = userService.authenticate(loginDTO);
+            AuthSessionService.IssuedTokens tokens = userService.authenticate(loginDTO);
             
             // Get user info
             UserInfo userInfo = userService.findByEmail(loginDTO.getEmail());
             
             if (userInfo != null) {
-                // Extract tokens from cookies
-                String accessToken = cookies.get(Constant.ACCESS_TOKEN).getValue();
-                String refreshToken = cookies.get(Constant.REFRESH_TOKEN).getValue();
-
                 AuthResponse authResponse = AuthResponse.builder()
-                        .expiresIn(3600L)
+                        .expiresIn(ACCESS_TOKEN_SECONDS)
                         .user(userInfo)
                         .build();
-
-                // Set cookies
-                response.addHeader("Set-Cookie", cookies.get(Constant.ACCESS_TOKEN).toString());
-                response.addHeader("Set-Cookie", cookies.get(Constant.REFRESH_TOKEN).toString());
+                authCookies.write(response, tokens);
 
                 return ResponseEntity.ok(new ApiResponseEntity<>(
                         Instant.now(),
@@ -238,20 +232,12 @@ public class AuthController {
                 UserInfo userInfo = userService.findByEmail(googleUserInfo.getEmail());
                 
                 if (userInfo != null) {
-                    String accessToken = jwtTokenProvider.generateToken(googleUserInfo.getEmail(), userInfo.getRoles().stream()
-                            .map(Role::getRoleName)
-                            .toList());
-                    RefreshToken refreshTokenEntity = jwtTokenProvider.createRefreshToken(googleUserInfo.getEmail());
-                    
+                    authCookies.write(response, userService.signIn(googleUserInfo.getEmail()));
+
                     AuthResponse authResponse = AuthResponse.builder()
-                            .expiresIn(3600L)
+                            .expiresIn(ACCESS_TOKEN_SECONDS)
                             .user(userInfo)
                             .build();
-                    
-                    response.addHeader("Set-Cookie", 
-                            userService.createAccessTokenCookie(accessToken).toString());
-                    response.addHeader("Set-Cookie", 
-                            userService.createRefreshTokenCookie(refreshTokenEntity.getToken()).toString());
                     
                     return ResponseEntity.ok(new ApiResponseEntity<>(
                             Instant.now(),
@@ -334,107 +320,28 @@ public class AuthController {
     }
 
     /**
-     * Refresh access token using refresh token
+     * Exchanges the refresh cookie for new tokens. The refresh token is single-use (rotation); a
+     * replayed one ends the whole sign-in session. Any failure clears the cookies and answers 401,
+     * so the client signs in again.
      */
     @PostMapping(Constant.REFRESH_TOKEN_MAPPING_REQUEST)
     public ResponseEntity<ApiResponseEntity<AuthResponse>> refreshToken(
             HttpServletRequest request,
             HttpServletResponse response) {
         try {
-            String refreshToken = extractRefreshTokenFromCookies(request);
-            
-            if (refreshToken != null && jwtTokenProvider.validateRefreshToken(refreshToken)) {
-                // Find the refresh token entity
-                var refreshTokenOpt = jwtTokenProvider.findByToken(refreshToken);
-                if (refreshTokenOpt.isPresent()) {
-                    RefreshToken refreshTokenEntity = jwtTokenProvider.verifyExpiration(refreshTokenOpt.get());
-                    String email = refreshTokenEntity.getUser().getEmail();
-                    
-                    // Generate new access token
-                    String newAccessToken = jwtTokenProvider.generateToken(email, refreshTokenEntity.getUser().getRoles().stream()
-                            .map(role -> role.getRoleName())
-                            .toList());
-                    
-                    AuthResponse authResponse = AuthResponse.builder()
-                            .expiresIn(3600L)
-                            .build();
-                    
-                    response.addHeader("Set-Cookie", 
-                            userService.createAccessTokenCookie(newAccessToken).toString());
-                    
-                    return ResponseEntity.ok(new ApiResponseEntity<>(
-                            Instant.now(),
-                            true,
-                            "Token refreshed successfully",
-                            HttpStatus.OK,
-                            authResponse
-                    ));
-                }
-            }
-            
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(new ApiResponseEntity<>(
-                            Instant.now(),
-                            false,
-                            "Invalid refresh token",
-                            HttpStatus.UNAUTHORIZED,
-                            null
-                    ));
-        } catch (Exception e) {
-            log.error("Error refreshing token", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ApiResponseEntity<>(
-                            Instant.now(),
-                            false,
-                            "Internal server error during token refresh",
-                            HttpStatus.INTERNAL_SERVER_ERROR,
-                            null
-                    ));
-        }
-    }
-
-    /**
-     * Logout user and clear cookies
-     */
-    @PostMapping(Constant.LOGOUT_MAPPING_REQUEST)
-    public ResponseEntity<ApiResponseEntity<String>> logout(
-            Authentication authentication,
-            HttpServletRequest request,
-            HttpServletResponse response) {
-        try {
-            SecurityContextHolder.clearContext();
-            
-            this.logoutHandler.logout(request, response, authentication);
-            
+            String refreshToken = authCookies.read(request, Constant.REFRESH_TOKEN)
+                    .orElseThrow(() -> new BadCredentialsException("No refresh token"));
+            authCookies.write(response, sessionService.refresh(refreshToken));
+            AuthResponse authResponse = AuthResponse.builder().expiresIn(ACCESS_TOKEN_SECONDS).build();
             return ResponseEntity.ok(new ApiResponseEntity<>(
-                    Instant.now(),
-                    true,
-                    "Logout successful",
-                    HttpStatus.OK,
-                    "User logged out successfully"
-            ));
-        } catch (Exception e) {
-            log.error("Error during logout", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ApiResponseEntity<>(
-                            Instant.now(),
-                            false,
-                            "Internal server error during logout",
-                            HttpStatus.INTERNAL_SERVER_ERROR,
-                            null
-                    ));
+                    Instant.now(), true, "Token refreshed successfully", HttpStatus.OK, authResponse));
+        } catch (BadCredentialsException e) {
+            authCookies.clear(response);
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new ApiResponseEntity<>(
+                    Instant.now(), false, "Session expired — please sign in again", HttpStatus.UNAUTHORIZED, null));
         }
     }
 
-    // Helper methods
-    private String extractRefreshTokenFromCookies(HttpServletRequest request) {
-        if (request.getCookies() != null) {
-            for (jakarta.servlet.http.Cookie cookie : request.getCookies()) {
-                if (Constant.REFRESH_TOKEN.equals(cookie.getName())) {
-                    return cookie.getValue();
-                }
-            }
-        }
-        return null;
-    }
+    // Sign-out is handled by Spring Security's logout filter on POST /api/v1/auth/logout, with
+    // SessionRevokingLogoutHandler revoking the session — no controller method is reached there.
 }

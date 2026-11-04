@@ -1,11 +1,9 @@
 package org.os.gitbase.jwt.jwtImpl;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.Jwts;
 import jakarta.annotation.PostConstruct;
-import org.os.gitbase.auth.entity.jwt.RefreshToken;
-import org.os.gitbase.auth.repository.RefreshTokenRepository;
-import org.os.gitbase.auth.repository.UserRepository;
 import org.os.gitbase.jwt.JwtTokenProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -16,13 +14,12 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
-import java.time.Instant;
+import java.time.Duration;
 import java.util.*;
 import java.util.function.Function;
 
 @Service
 public class JwtTokenProviderImpl implements JwtTokenProvider {
-    private static final long JWT_TOKEN_VALIDITY = 24 * 60 * 60; // 24 hours
     private PrivateKey privateKey;
     private PublicKey publicKey;
     @Value("${jwt-keys.private_key}")
@@ -31,13 +28,6 @@ public class JwtTokenProviderImpl implements JwtTokenProvider {
     private String pubk;
     final String ISSUER = "http://localhost:8880";
     final String AUDIENCE = "http://localhost:8880";
-    private final RefreshTokenRepository refreshTokenRepository;
-    private final UserRepository userRepository;
-
-    public JwtTokenProviderImpl(RefreshTokenRepository refreshTokenRepository, UserRepository userRepository) {
-        this.refreshTokenRepository = refreshTokenRepository;
-        this.userRepository = userRepository;
-    }
 
     @PostConstruct
     public void init() {
@@ -86,24 +76,40 @@ public class JwtTokenProviderImpl implements JwtTokenProvider {
         return (username.equals(userDetails.getUsername()) && !isTokenExpired(token));
     }
 
-    public String generateToken(String username, List<String> roles) {
-        Map<String, Object> claims = new HashMap<>();
-        return createToken(claims, username, roles);
-    }
-
     @Override
-    public String createToken(Map<String, Object> claims, String username, List<String> roles) {
-        claims.put("roles", roles);
-
-        return Jwts.builder().claims(claims)
+    public String generateToken(String username, List<String> roles, UUID sessionId, Duration ttl) {
+        long now = System.currentTimeMillis();
+        return Jwts.builder()
+                .id(UUID.randomUUID().toString())
                 .subject(username)
+                .claim("roles", roles)
+                .claim(SESSION_CLAIM, sessionId.toString())
                 .issuer(ISSUER)
-                .issuedAt(new Date(System.currentTimeMillis()))
-                .expiration(new Date(System.currentTimeMillis() + JWT_TOKEN_VALIDITY * 1000))
+                .issuedAt(new Date(now))
+                .expiration(new Date(now + ttl.toMillis()))
                 .signWith(privateKey)
                 .audience().add(AUDIENCE)
                 .and()
                 .compact();
+    }
+
+    @Override
+    public Optional<UUID> extractSessionId(String token) {
+        Claims claims;
+        try {
+            claims = extractAllClaims(token);
+        } catch (ExpiredJwtException expired) {
+            claims = expired.getClaims(); // signature was verified before the expiry check
+        }
+        Object sid = claims.get(SESSION_CLAIM);
+        if (sid == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(UUID.fromString(sid.toString()));
+        } catch (IllegalArgumentException malformed) {
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -120,49 +126,5 @@ public class JwtTokenProviderImpl implements JwtTokenProvider {
         X509EncodedKeySpec spec = new X509EncodedKeySpec(keyBytes);
         KeyFactory kf = KeyFactory.getInstance("RSA");
         return kf.generatePublic(spec);
-    }
-
-    @Override
-    public RefreshToken createRefreshToken(String email) {
-        Optional<RefreshToken> optionalToken = refreshTokenRepository.findRefreshTokenByEmail(email);
-        if (optionalToken.isPresent()) {
-            RefreshToken existingToken = optionalToken.get();
-            if (existingToken.getExpiryDate().isAfter(Instant.now())) {
-                existingToken.setExpiryDate(Instant.now().plusMillis(28800000));
-                return refreshTokenRepository.save(existingToken);
-            } else {
-                refreshTokenRepository.delete(existingToken);
-            }
-        }
-        RefreshToken newRefreshToken = RefreshToken.builder()
-                .user(userRepository.findUserByEmail(email).get())
-                .token(UUID.randomUUID().toString())
-                .expiryDate(Instant.now().plusMillis(28800000))
-                .build();
-        return refreshTokenRepository.save(newRefreshToken);
-    }
-
-    @Override
-    public Optional<RefreshToken> findByToken(String token) {
-        return refreshTokenRepository.findByToken(token);
-    }
-
-    @Override
-    public RefreshToken verifyExpiration(RefreshToken token) {
-        if (token.getExpiryDate().compareTo(Instant.now()) < 0) {
-            refreshTokenRepository.delete(token);
-            throw new RuntimeException(token.getToken() + " Refresh token is expired. Please make a new login..!");
-        }
-        return token;
-    }
-
-    @Override
-    public boolean validateRefreshToken(String token) {
-        try {
-            Optional<RefreshToken> optionalToken = refreshTokenRepository.findByToken(token);
-            return optionalToken.isPresent() && optionalToken.get().getExpiryDate().isAfter(Instant.now());
-        } catch (RuntimeException ex) {
-            throw new RuntimeException("Refresh token not valide");
-        }
     }
 }

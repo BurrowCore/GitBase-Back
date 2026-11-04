@@ -12,12 +12,13 @@ import org.os.gitbase.auth.dto.UserInfo;
 import org.os.gitbase.auth.entity.Role;
 import org.os.gitbase.auth.entity.User;
 import org.os.gitbase.auth.entity.enums.AuthProvider;
-import org.os.gitbase.auth.entity.jwt.RefreshToken;
 import org.os.gitbase.auth.mapper.UserMapper;
 import org.os.gitbase.auth.repository.RoleRepository;
 import org.os.gitbase.auth.repository.UserRepository;
 import org.os.gitbase.common.ApiResponseEntity;
 import org.os.gitbase.google.UserPrincipal;
+import org.os.gitbase.auth.service.AuthCookies;
+import org.os.gitbase.auth.service.AuthSessionService;
 import org.os.gitbase.auth.service.UsernameAllocator;
 import org.os.gitbase.jwt.JwtTokenProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,9 +64,14 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
             .registerModule(new JavaTimeModule());
 
     private final UsernameAllocator usernameAllocator;
+    private final AuthSessionService sessionService;
+    private final AuthCookies authCookies;
 
-    public OAuth2AuthenticationSuccessHandler(UsernameAllocator usernameAllocator) {
+    public OAuth2AuthenticationSuccessHandler(UsernameAllocator usernameAllocator, AuthSessionService sessionService,
+                                              AuthCookies authCookies) {
         this.usernameAllocator = usernameAllocator;
+        this.sessionService = sessionService;
+        this.authCookies = authCookies;
     }
 
 
@@ -137,44 +143,8 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
 
             log.info("Found or created user in database: {} with ID: {}", user.getEmail(), user.getId());
 
-            String accessToken = tokenProvider.generateToken(email, roles);
-
-            // Create refresh token for the user
-            RefreshToken refreshToken = tokenProvider.createRefreshToken(email);
-
-            // Create user info from the actual database user
-            UserInfo userInfo = userMapper.mapFromAuthUserToUserInfoResponse(user);
-            log.info("Created UserInfo from database user: {}", userInfo);
-
-            // Create auth response
-//            AuthResponse authResponse = AuthResponse.builder()
-//                    .expiresIn(3600L)
-//                    .user(userInfo)
-//                    .build();
-
-//            // Create API response wrapper
-//            ApiResponseEntity<AuthResponse> apiResponse = new ApiResponseEntity<>(
-//                    Instant.now(),
-//                    true,
-//                    "OAuth2 authentication successful",
-//                    HttpStatus.OK,
-//                    authResponse
-//            );
-
-            // Set cookies
-            Cookie accessTokenCookie = new Cookie(Constant.ACCESS_TOKEN, accessToken);
-            accessTokenCookie.setPath("/");
-            accessTokenCookie.setHttpOnly(true);
-            accessTokenCookie.setSecure(false); // Set to true in production with HTTPS
-            accessTokenCookie.setMaxAge(3600); // 1 hour
-            response.addCookie(accessTokenCookie);
-
-            Cookie refreshTokenCookie = new Cookie(Constant.REFRESH_TOKEN, refreshToken.getToken());
-            refreshTokenCookie.setPath("/");
-            refreshTokenCookie.setHttpOnly(true);
-            refreshTokenCookie.setSecure(false); // Set to true in production with HTTPS
-            refreshTokenCookie.setMaxAge(7 * 24 * 3600); // 7 days
-            response.addCookie(refreshTokenCookie);
+            // Same session, tokens and cookies as a password sign-in.
+            authCookies.write(response, sessionService.signIn(user));
 
             // Set response headers
             response.setStatus(HttpStatus.OK.value());
