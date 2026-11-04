@@ -5,10 +5,8 @@ import org.os.gitbase.constant.Constant;
 import org.os.gitbase.git.config.GitTokenAuthenticationProvider;
 import org.os.gitbase.git.service.CommandGitService;
 import org.os.gitbase.google.OAuth2UserService;
-import org.os.gitbase.jwt.JwtTokenProvider;
 import org.os.gitbase.security.config.*;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -30,27 +28,21 @@ import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.oauth2.jwt.JwtDecoder;
-import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.os.gitbase.auth.service.UserDetailService;
 
 
 
-import java.security.interfaces.RSAPublicKey;
 import java.util.List;
 
 @EnableWebSecurity
 @EnableMethodSecurity(prePostEnabled = true)
 @Configuration
 public class ApiSecurity {
-    private final JwtTokenProvider jwtService;
     private final JwtAuthenticationFilter jwtFilter;
     private final UserDetailService userDetailsService;
     private final AuthenticationEntry authenticationEntry;
 
-    @Value("${jwt-keys.public_key}")
-    private String public_key;
     private final String[] matchers = {
             "/api/v1/auth/login",
             "/api/v1/auth/register",
@@ -77,9 +69,8 @@ public class ApiSecurity {
 
 
     @Autowired
-    public ApiSecurity(JwtTokenProvider jwtService, JwtAuthenticationFilter jwtFilter,
+    public ApiSecurity(JwtAuthenticationFilter jwtFilter,
                        UserDetailService userDetailsService, AuthenticationEntry authenticationEntry) {
-        this.jwtService = jwtService;
         this.jwtFilter = jwtFilter;
         this.userDetailsService = userDetailsService;
         this.authenticationEntry = authenticationEntry;
@@ -106,7 +97,8 @@ public class ApiSecurity {
 
     @Bean
     @Order(2)
-    public SecurityFilterChain securityFilterChain(HttpSecurity http, PasswordEncoder passwordEncoder) throws Exception {
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, PasswordEncoder passwordEncoder,
+                                                   SessionRevokingLogoutHandler sessionRevokingLogoutHandler) throws Exception {
         return http.cors(Customizer.withDefaults())
                 .csrf(csrf -> {
                     CookieCsrfTokenRepository csrfTokenRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
@@ -123,7 +115,8 @@ public class ApiSecurity {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
                 .authenticationProvider(authenticationProvider(passwordEncoder))
                 .exceptionHandling(exception -> exception.authenticationEntryPoint(authenticationEntry))
-                .oauth2ResourceServer(authorize -> authorize.jwt(Customizer.withDefaults()))
+                // No Bearer-token resource server: access tokens are only accepted as the cookie, by
+                // JwtAuthenticationFilter, which also checks that their sign-in session is still active.
                 .oauth2Login(oauth2 -> oauth2
                         .authorizationEndpoint(authorization -> authorization
                                 .baseUri("/oauth2/authorize")
@@ -175,11 +168,11 @@ public class ApiSecurity {
                             res.setHeader("Access-Control-Allow-Credentials", "true");
                             res.setStatus(HttpServletResponse.SC_OK);
                         })
+                        // Revokes the sign-in session server-side (so copies of the tokens stop
+                        // working) and clears the auth cookies on their own paths.
+                        .addLogoutHandler(sessionRevokingLogoutHandler)
                         .invalidateHttpSession(true)
-                        .deleteCookies(
-                                Constant.XSRF_TOKEN,
-                                Constant.ACCESS_TOKEN,
-                                Constant.REFRESH_TOKEN)
+                        .deleteCookies(Constant.XSRF_TOKEN)
                         .clearAuthentication(true))
                 .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
                 .build();
@@ -190,12 +183,6 @@ public class ApiSecurity {
         DaoAuthenticationProvider authenticationProvider = new DaoAuthenticationProvider(userDetailsService);
         authenticationProvider.setPasswordEncoder(passwordEncoder);
         return authenticationProvider;
-    }
-
-    @Bean
-    public JwtDecoder jwtDecoder() throws Exception {
-        final RSAPublicKey rsaPublicKey = (RSAPublicKey) this.jwtService.loadPublicKey(public_key);
-        return NimbusJwtDecoder.withPublicKey(rsaPublicKey).build();
     }
 
     /*
