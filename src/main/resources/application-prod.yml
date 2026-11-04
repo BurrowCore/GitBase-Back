@@ -15,9 +15,6 @@ spring:
       leak-detection-threshold: 60000
   jpa:
     show-sql: false
-#  flyway:
-#    clean-disabled: true
-#    validate-on-migrate: true
 
 logging:
   level:

@@ -22,6 +22,9 @@ public interface GitRepositoryDB extends JpaRepository<RepositoryGit, UUID> {
     long countByOwner(User owner);
     Optional<RepositoryGit> findByOwnerNameAndRepoName(String ownerName, String repoName);
 
+    /** Repository names are unique per owner ignoring case (uk_repository_owner_lower_name). */
+    boolean existsByOwnerNameAndRepoNameIgnoreCase(String ownerName, String repoName);
+
     /**
      * Locks the repository row so a #number can be allocated without two concurrent creates
      * claiming the same one. Must be called inside a transaction.

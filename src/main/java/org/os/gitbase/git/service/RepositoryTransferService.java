@@ -89,7 +89,7 @@ public class RepositoryTransferService {
         RepositoryGit found = repositoryDB.findByOwnerNameAndRepoName(owner, repoName)
                 .orElseThrow(() -> new ResourceNotFoundException("Repository not found: " + owner + "/" + repoName));
         RepositoryGit repo = repositoryDB.findByIdForUpdate(found.getId()).orElseThrow();
-        if (repositoryDB.findByOwnerNameAndRepoName(target, repoName).isPresent()) {
+        if (repositoryDB.existsByOwnerNameAndRepoNameIgnoreCase(target, repoName)) {
             throw new ConflictException(target + " already has a repository named " + repoName);
         }
 

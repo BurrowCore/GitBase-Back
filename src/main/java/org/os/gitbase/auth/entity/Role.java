@@ -19,9 +19,9 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 public class Role {
     @Id
-    @GeneratedValue(strategy = GenerationType.SEQUENCE)
-    @SequenceGenerator(name = "refreshTokenSequenceGenerator", sequenceName = "refreshToken_generator", allocationSize = 1)
+    @GeneratedValue(strategy = GenerationType.SEQUENCE) // t_role_seq; roles are seeded by V3__seed_default_roles.sql
     private Long id;
+    @Column(name = "role_name", nullable = false, unique = true)
     private String roleName;
     @ManyToMany(mappedBy = "roles", fetch = FetchType.LAZY)
     @JsonIgnore

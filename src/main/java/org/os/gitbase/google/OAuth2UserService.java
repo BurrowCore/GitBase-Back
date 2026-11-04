@@ -86,7 +86,7 @@ public class OAuth2UserService extends DefaultOAuth2UserService {
             // Assign default USER role
             Set<Role> roles = new HashSet<>();
             Role userRole = roleRepository.findRoleByRoleName("ROLE_USER")
-                    .orElseThrow(() -> new RuntimeException("Default USER role not found. Please ensure the DataInitializer has run."));
+                    .orElseThrow(() -> new RuntimeException("Default USER role not found — it is seeded by migration V3__seed_default_roles.sql."));
             roles.add(userRole);
             user.setRoles(roles);
 
@@ -116,7 +116,7 @@ public class OAuth2UserService extends DefaultOAuth2UserService {
             // Ensure user has at least USER role
             if (existingUser.getRoles().isEmpty()) {
                 Role userRole = roleRepository.findRoleByRoleName("ROLE_USER")
-                        .orElseThrow(() -> new RuntimeException("Default USER role not found. Please ensure the DataInitializer has run."));
+                        .orElseThrow(() -> new RuntimeException("Default USER role not found — it is seeded by migration V3__seed_default_roles.sql."));
                 existingUser.getRoles().add(userRole);
                 log.info("Added ROLE_USER to existing user: {}", existingUser.getEmail());
             }
